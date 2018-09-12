@@ -92,6 +92,7 @@ type SqlSupplierOldStores struct {
 	channelMemberHistory store.ChannelMemberHistoryStore
 	role                 store.RoleStore
 	scheme               store.SchemeStore
+	group                store.GroupStore
 }
 
 type SqlSupplier struct {
@@ -149,6 +150,7 @@ func NewSqlSupplier(settings model.SqlSettings, metrics einterfaces.MetricsInter
 	initSqlSupplierReactions(supplier)
 	initSqlSupplierRoles(supplier)
 	initSqlSupplierSchemes(supplier)
+	initSqlSupplierGroups(supplier)
 
 	err := supplier.GetMaster().CreateTablesIfNotExists()
 	if err != nil {
@@ -676,8 +678,8 @@ func (ss *SqlSupplier) AlterColumnTypeIfExists(tableName string, columnName stri
 	return true
 }
 
-func (ss *SqlSupplier) CreateUniqueIndexIfNotExists(indexName string, tableName string, columnName string) bool {
-	return ss.createIndexIfNotExists(indexName, tableName, []string{columnName}, INDEX_TYPE_DEFAULT, true)
+func (ss *SqlSupplier) CreateUniqueIndexIfNotExists(indexName string, tableName string, columnNames []string) bool {
+	return ss.createIndexIfNotExists(indexName, tableName, columnNames, INDEX_TYPE_DEFAULT, true)
 }
 
 func (ss *SqlSupplier) CreateIndexIfNotExists(indexName string, tableName string, columnName string) bool {
@@ -963,6 +965,10 @@ func (ss *SqlSupplier) Role() store.RoleStore {
 
 func (ss *SqlSupplier) Scheme() store.SchemeStore {
 	return ss.oldStores.scheme
+}
+
+func (ss *SqlSupplier) Group() store.GroupStore {
+	return ss.oldStores.group
 }
 
 func (ss *SqlSupplier) DropAllTables() {
