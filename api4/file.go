@@ -4,9 +4,11 @@
 package api4
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"io"
 	"io/ioutil"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -47,7 +49,8 @@ var MEDIA_CONTENT_TYPES = [...]string{
 }
 
 func (api *API) InitFile() {
-	api.BaseRoutes.Files.Handle("", api.ApiSessionRequired(uploadFile)).Methods("POST")
+	api.BaseRoutes.Files.Handle("", api.ApiSessionRequired(uploadFileStream)).Methods("POST")
+	//api.BaseRoutes.Files.Handle("", api.ApiSessionRequired(uploadFile)).Methods("POST")
 	api.BaseRoutes.File.Handle("", api.ApiSessionRequiredTrustRequester(getFile)).Methods("GET")
 	api.BaseRoutes.File.Handle("/thumbnail", api.ApiSessionRequiredTrustRequester(getFileThumbnail)).Methods("GET")
 	api.BaseRoutes.File.Handle("/link", api.ApiSessionRequired(getFileLink)).Methods("GET")
@@ -114,8 +117,9 @@ func uploadFile(c *Context, w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		channelId := props["channel_id"][0]
-		if len(channelId) == 0 {
-			c.SetInvalidParam("channel_id")
+		c.Params.ChannelId = channelId
+		c.RequireChannelId()
+		if c.Err != nil {
 			return
 		}
 
@@ -141,6 +145,195 @@ func uploadFile(c *Context, w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusCreated)
 	w.Write([]byte(resStruct.ToJson()))
+}
+
+func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
+	// TODO wrap r.Body into a LimitReader to ensure the total limit,
+
+	// TODO Why was this here: defer io.Copy(ioutil.Discard, r.Body)
+
+	if !*c.App.Config().FileSettings.EnableFileAttachments {
+		c.Err = model.NewAppError("uploadFile", "api.file.attachments.disabled.app_error", nil, "", http.StatusNotImplemented)
+		return
+	}
+
+	// Parse the post as a regular form (in practice, use the URL values
+	// since we never expect a real application/x-www-form-urlencoded form)
+	if r.Form == nil {
+		err := r.ParseForm()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	timestamp := time.Now()
+	var resp *model.FileUploadResponse
+
+	mr, err := r.MultipartReader()
+	switch err {
+	case nil:
+		resp = uploadFileMultipart(c, mr, timestamp)
+
+	case http.ErrNotMultipart:
+		// Simple POST with the file in the body and all metadata in the args
+		c.RequireChannelId()
+		c.RequireFilename()
+		if c.Err != nil {
+			return
+		}
+
+		// Check permissions
+		if !c.App.SessionHasPermissionToChannel(c.Session, c.Params.ChannelId, model.PERMISSION_UPLOAD_FILE) {
+			c.SetPermissionError(model.PERMISSION_UPLOAD_FILE)
+			return
+		}
+
+		info, appErr := c.App.UploadFile(&app.UploadFileContext{
+			Timestamp:     timestamp,
+			TeamId:        FILE_TEAM_ID,
+			ChannelId:     c.Params.ChannelId,
+			UserId:        c.Session.UserId,
+			Name:          c.Params.Filename,
+			ContentLength: r.ContentLength,
+			Input:         r.Body,
+		})
+		if appErr != nil {
+			c.Err = appErr
+			return
+		}
+
+		resp = &model.FileUploadResponse{
+			FileInfos: []*model.FileInfo{info},
+		}
+
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if c.Err != nil {
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	w.Write([]byte(resp.ToJson()))
+}
+
+const maxValueBytes = 10 * 1024
+
+func uploadFileMultipart(c *Context, mr *multipart.Reader, timestamp time.Time) *model.FileUploadResponse {
+	clientIds := []string(nil)
+	haveClientIds := false
+	resp := model.FileUploadResponse{
+		FileInfos: []*model.FileInfo{},
+		ClientIds: []string{},
+	}
+
+	for {
+		p, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			c.Err = model.NewAppError("uploadFileMultipart",
+				"api.file.upload_file.error_read_part.app_error",
+				nil, "", http.StatusBadRequest)
+			return nil
+		}
+
+		// Parse any form fields in the multipart
+		formname := p.FormName()
+		if formname == "" {
+			continue
+		}
+		filename := p.FileName()
+		if filename == "" {
+			var b bytes.Buffer
+			_, err := io.CopyN(&b, p, maxValueBytes)
+			if err != nil && err != io.EOF {
+				c.Err = model.NewAppError("uploadFileMultipart",
+					"api.file.upload_file.error_read_part.app_error",
+					nil, "", http.StatusBadRequest)
+				return nil
+			}
+			v := b.String()
+
+			switch formname {
+			case "channel_id":
+				// Allow the channel_id value in the form to override URL params if any
+				if v != "" {
+					c.Params.ChannelId = v
+				}
+
+			case "client_ids":
+				haveClientIds = true
+				clientIds = append(clientIds, v)
+
+			default:
+				c.SetInvalidParam("formname")
+				return nil
+			}
+
+			continue
+		}
+
+		// A file part
+
+		c.RequireChannelId()
+		if c.Err != nil {
+			return nil
+		}
+		if !c.App.SessionHasPermissionToChannel(c.Session, c.Params.ChannelId, model.PERMISSION_UPLOAD_FILE) {
+			c.SetPermissionError(model.PERMISSION_UPLOAD_FILE)
+			return nil
+		}
+
+		// Must have a exactly one client ID for each file
+		clientId := ""
+		if len(clientIds) > 0 {
+			clientId = clientIds[0]
+			clientIds = clientIds[1:]
+		}
+		if haveClientIds && clientId == "" {
+			c.Err = model.NewAppError("uploadFileMultipart",
+				"api.file.upload_file.incorrect_number_of_files.app_error",
+				nil, "", http.StatusBadRequest)
+			return nil
+		}
+
+		// do upload
+		info, appErr := c.App.UploadFile(&app.UploadFileContext{
+			Timestamp:     timestamp,
+			TeamId:        FILE_TEAM_ID,
+			ChannelId:     c.Params.ChannelId,
+			UserId:        c.Session.UserId,
+			ClientId:      clientId,
+			Name:          filename,
+			ContentLength: -1,
+			Input:         p,
+		})
+		if appErr != nil {
+			c.Err = appErr
+			return nil
+		}
+
+		// add to the response
+		resp.FileInfos = append(resp.FileInfos, info)
+		if haveClientIds {
+			resp.ClientIds = append(resp.ClientIds, clientId)
+		}
+	}
+
+	// Verify that the number of ClientIds matched the number of files
+	if haveClientIds && len(clientIds) != 0 {
+		c.Err = model.NewAppError("uploadFileMultipart",
+			"api.file.upload_file.incorrect_number_of_files.app_error",
+			nil, "", http.StatusBadRequest)
+		return nil
+	}
+
+	return &resp
 }
 
 func getFile(c *Context, w http.ResponseWriter, r *http.Request) {

@@ -1141,6 +1141,10 @@
     "translation": "Unable to upload file. File is too large."
   },
   {
+    "id": "api.file.upload_file.error_read_part.app_error",
+    "translation": "Unable to read mime/multipart message from the client."
+  },
+  {
     "id": "api.file.write_file.s3.app_error",
     "translation": "Encountered an error writing to S3"
   },

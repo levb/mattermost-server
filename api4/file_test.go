@@ -4,15 +4,101 @@
 package api4
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/gif"
+	"image/jpeg"
+	"math/rand"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
 	"github.com/mattermost/mattermost-server/store"
 )
+
+func BenchmarkUploadImage(b *testing.B) {
+	b.StopTimer()
+
+	th := Setup().InitBasic().InitSystemAdmin()
+	defer th.TearDown()
+	// disable logging in the benchmark, as best we can
+	th.App.Log.SetConsoleLevel(mlog.LevelError)
+	Client := th.Client
+	channel := th.BasicChannel
+
+	benchOne := func(b *testing.B, data []byte, title string) {
+		fileResp, resp := Client.UploadFile(data, channel.Id, title)
+		if resp.Error != nil {
+			b.Fatal(resp.Error)
+		}
+		if len(fileResp.FileInfos) != 1 {
+			b.Fatal("should've returned a single file infos")
+		}
+		uploadInfo := fileResp.FileInfos[0]
+
+		b.StopTimer()
+		result := <-th.App.Srv.Store.FileInfo().Get(uploadInfo.Id)
+		if result.Err != nil {
+			b.Fatal(result.Err)
+		}
+		info := result.Data.(*model.FileInfo)
+
+		if err := th.cleanupTestFile(info); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+	}
+
+	bench := func(b *testing.B, data []byte, tmpl string) {
+		for i := 0; i < b.N; i++ {
+			benchOne(b, data, fmt.Sprintf(tmpl, i))
+		}
+	}
+
+	// Create a random image (pre-seeded for predictability)
+	rgba := image.NewRGBA(image.Rectangle{
+		image.Point{0, 0},
+		image.Point{1024, 1024},
+	})
+	_, err := rand.New(rand.NewSource(1)).Read(rgba.Pix)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Encode it as JPEG and GIF
+	buf := &bytes.Buffer{}
+	err = jpeg.Encode(buf, rgba, &jpeg.Options{Quality: 50})
+	if err != nil {
+		b.Fatal(err)
+	}
+	randomJPEG := buf.Bytes()
+
+	buf = &bytes.Buffer{}
+	err = gif.Encode(buf, rgba, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	randomGIF := buf.Bytes()
+
+	// Run the benchmarks
+	b.StartTimer()
+
+	b.Run(
+		fmt.Sprintf("Random GIF %dMb\n", (len(randomGIF)+512*1024)/(1024*1024)),
+		func(b *testing.B) {
+			bench(b, randomGIF, "test%d.gif")
+		})
+
+	b.Run(
+		fmt.Sprintf("Random JPEG %dMb\n", (len(randomJPEG)+512*1024)/(1024*1024)),
+		func(b *testing.B) {
+			bench(b, randomJPEG, "test%d.jpg")
+		})
+}
 
 func TestUploadFileAsMultipart(t *testing.T) {
 	th := Setup().InitBasic().InitSystemAdmin()
@@ -101,13 +187,23 @@ func TestUploadFileAsMultipart(t *testing.T) {
 	CheckForbiddenStatus(t, resp)
 
 	_, resp = Client.UploadFile(data, "../../junk", "test.png")
-	CheckForbiddenStatus(t, resp)
+	if resp.StatusCode == 0 {
+		t.Log("file upload request failed completely")
+	} else if resp.StatusCode != http.StatusBadRequest {
+		// This should return an HTTP 400, but it occasionally causes the http client itself to error
+		t.Fatalf("should've returned HTTP 400 or failed completely, got %v instead", resp.StatusCode)
+	}
 
 	_, resp = th.SystemAdminClient.UploadFile(data, model.NewId(), "test.png")
 	CheckForbiddenStatus(t, resp)
 
 	_, resp = th.SystemAdminClient.UploadFile(data, "../../junk", "test.png")
-	CheckForbiddenStatus(t, resp)
+	if resp.StatusCode == 0 {
+		t.Log("file upload request failed completely")
+	} else if resp.StatusCode != http.StatusBadRequest {
+		// This should return an HTTP 400, but it occasionally causes the http client itself to error
+		t.Fatalf("should've returned HTTP 400 or failed completely, got %v instead", resp.StatusCode)
+	}
 
 	_, resp = th.SystemAdminClient.UploadFile(data, channel.Id, "test.png")
 	CheckNoError(t, resp)

@@ -2253,16 +2253,16 @@ func (c *Client4) UploadFile(data []byte, channelId string, filename string) (*F
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
-	if part, err := writer.CreateFormFile("files", filename); err != nil {
-		return nil, &Response{Error: NewAppError("UploadPostAttachment", "model.client.upload_post_attachment.file.app_error", nil, err.Error(), http.StatusBadRequest)}
-	} else if _, err = io.Copy(part, bytes.NewBuffer(data)); err != nil {
-		return nil, &Response{Error: NewAppError("UploadPostAttachment", "model.client.upload_post_attachment.file.app_error", nil, err.Error(), http.StatusBadRequest)}
-	}
-
 	if part, err := writer.CreateFormField("channel_id"); err != nil {
 		return nil, &Response{Error: NewAppError("UploadPostAttachment", "model.client.upload_post_attachment.channel_id.app_error", nil, err.Error(), http.StatusBadRequest)}
 	} else if _, err = io.Copy(part, strings.NewReader(channelId)); err != nil {
 		return nil, &Response{Error: NewAppError("UploadPostAttachment", "model.client.upload_post_attachment.channel_id.app_error", nil, err.Error(), http.StatusBadRequest)}
+	}
+
+	if part, err := writer.CreateFormFile("files", filename); err != nil {
+		return nil, &Response{Error: NewAppError("UploadPostAttachment", "model.client.upload_post_attachment.file.app_error", nil, err.Error(), http.StatusBadRequest)}
+	} else if _, err = io.Copy(part, bytes.NewBuffer(data)); err != nil {
+		return nil, &Response{Error: NewAppError("UploadPostAttachment", "model.client.upload_post_attachment.file.app_error", nil, err.Error(), http.StatusBadRequest)}
 	}
 
 	if err := writer.Close(); err != nil {
