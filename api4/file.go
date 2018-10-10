@@ -152,84 +152,126 @@ func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
 
 	// TODO Why was this here: defer io.Copy(ioutil.Discard, r.Body)
 
+	var resp *model.FileUploadResponse
+	defer func() {
+		if c.Err != nil {
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(resp.ToJson()))
+	}()
+
 	if !*c.App.Config().FileSettings.EnableFileAttachments {
-		c.Err = model.NewAppError("uploadFile", "api.file.attachments.disabled.app_error", nil, "", http.StatusNotImplemented)
+		c.Err = model.NewAppError("uploadFileStream",
+			"api.file.attachments.disabled.app_error",
+			nil, "", http.StatusNotImplemented)
 		return
 	}
 
 	// Parse the post as a regular form (in practice, use the URL values
-	// since we never expect a real application/x-www-form-urlencoded form)
+	// since we never expect a real application/x-www-form-urlencoded
+	// form).
 	if r.Form == nil {
 		err := r.ParseForm()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			c.Err = model.NewAppError("uploadFileStream",
+				"api.file.upload_file.read_request.app_error",
+				nil, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
 
 	timestamp := time.Now()
-	var resp *model.FileUploadResponse
 
-	mr, err := r.MultipartReader()
-	switch err {
-	case nil:
-		resp = uploadFileMultipart(c, mr, timestamp)
-
-	case http.ErrNotMultipart:
-		// Simple POST with the file in the body and all metadata in the args
-		c.RequireChannelId()
-		c.RequireFilename()
-		if c.Err != nil {
-			return
-		}
-
-		// Check permissions
-		if !c.App.SessionHasPermissionToChannel(c.Session, c.Params.ChannelId, model.PERMISSION_UPLOAD_FILE) {
-			c.SetPermissionError(model.PERMISSION_UPLOAD_FILE)
-			return
-		}
-
-		info, appErr := c.App.UploadFile(&app.UploadFileContext{
-			Timestamp:     timestamp,
-			TeamId:        FILE_TEAM_ID,
-			ChannelId:     c.Params.ChannelId,
-			UserId:        c.Session.UserId,
-			Name:          c.Params.Filename,
-			ContentLength: r.ContentLength,
-			Input:         r.Body,
-		})
-		if appErr != nil {
-			c.Err = appErr
-			return
-		}
-
-		resp = &model.FileUploadResponse{
-			FileInfos: []*model.FileInfo{info},
-		}
-
-	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	_, err := r.MultipartReader()
+	if err == nil {
+		resp = uploadFileMultipart(c, r, timestamp, bufferedMode)
+		return
+	} else if err != http.ErrNotMultipart {
+		c.Err = model.NewAppError("uploadFileStream",
+			"api.file.upload_file.read_request.app_error",
+			nil, err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	// Simple POST with the file in the body and all metadata in the args.
+	c.RequireChannelId()
+	c.RequireFilename()
 	if c.Err != nil {
 		return
 	}
 
-	w.WriteHeader(http.StatusCreated)
-	w.Write([]byte(resp.ToJson()))
+	if !c.App.SessionHasPermissionToChannel(c.Session, c.Params.ChannelId, model.PERMISSION_UPLOAD_FILE) {
+		c.SetPermissionError(model.PERMISSION_UPLOAD_FILE)
+		return
+	}
+
+	info, appErr := c.App.UploadFile(&app.UploadFileContext{
+		Timestamp:     timestamp,
+		TeamId:        FILE_TEAM_ID,
+		ChannelId:     c.Params.ChannelId,
+		UserId:        c.Session.UserId,
+		Name:          c.Params.Filename,
+		ContentLength: r.ContentLength,
+		Input:         r.Body,
+	})
+	if appErr != nil {
+		c.Err = appErr
+		return
+	}
+
+	resp = &model.FileUploadResponse{
+		FileInfos: []*model.FileInfo{info},
+	}
 }
 
 const maxValueBytes = 10 * 1024
 
-func uploadFileMultipart(c *Context, mr *multipart.Reader, timestamp time.Time) *model.FileUploadResponse {
+type uploadFileMultipartMode bool
+
+const (
+	streamMode   = uploadFileMultipartMode(false)
+	bufferedMode = uploadFileMultipartMode(true)
+)
+
+// uploadFileMultipart first peeks into the multipart message to see if
+// channel_id comes before any of the files.  It buffers what it reads out of
+// Input. Then if the channel_id is found, it re-processes the entire POST in
+// the streaming mode, else it prebuffers the entire message, up to the allowed
+// limit.
+func uploadFileMultipart(c *Context, r *http.Request, timestamp time.Time,
+	mode uploadFileMultipartMode) *model.FileUploadResponse {
+
+	expectClientIds := true
 	clientIds := []string(nil)
-	haveClientIds := false
 	resp := model.FileUploadResponse{
 		FileInfos: []*model.FileInfo{},
 		ClientIds: []string{},
 	}
 
+	buf := (*bytes.Buffer)(nil)
+	prevBody := r.Body
+	if mode == bufferedMode {
+		buf = &bytes.Buffer{}
+		// We need to buffer until we get the channel_id, or the first
+		// file.
+		r.Body = ioutil.NopCloser(io.TeeReader(r.Body, buf))
+	}
+
+	// Zero out previous multipartReader so that it can be obtained again.
+	r.MultipartForm = nil
+
+	mr, err := r.MultipartReader()
+	r.Body = prevBody
+	if err != nil {
+		c.Err = model.NewAppError("uploadFileMultipart",
+			"api.file.upload_file.read_request.app_error",
+			nil, err.Error(), http.StatusBadRequest)
+		return nil
+	}
+
+	nFiles := 0
 	for {
 		p, err := mr.NextPart()
 		if err == io.EOF {
@@ -237,12 +279,12 @@ func uploadFileMultipart(c *Context, mr *multipart.Reader, timestamp time.Time) 
 		}
 		if err != nil {
 			c.Err = model.NewAppError("uploadFileMultipart",
-				"api.file.upload_file.error_read_part.app_error",
-				nil, "", http.StatusBadRequest)
+				"api.file.upload_file.read_request.app_error",
+				nil, err.Error(), http.StatusBadRequest)
 			return nil
 		}
 
-		// Parse any form fields in the multipart
+		// Parse any form fields in the multipart.
 		formname := p.FormName()
 		if formname == "" {
 			continue
@@ -253,21 +295,35 @@ func uploadFileMultipart(c *Context, mr *multipart.Reader, timestamp time.Time) 
 			_, err := io.CopyN(&b, p, maxValueBytes)
 			if err != nil && err != io.EOF {
 				c.Err = model.NewAppError("uploadFileMultipart",
-					"api.file.upload_file.error_read_part.app_error",
-					nil, "", http.StatusBadRequest)
+					"api.file.upload_file.read_request.app_error",
+					nil, err.Error(), http.StatusBadRequest)
 				return nil
 			}
 			v := b.String()
 
 			switch formname {
 			case "channel_id":
-				// Allow the channel_id value in the form to override URL params if any
+				// Allow the channel_id value in the form to
+				// override URL params if any.
 				if v != "" {
 					c.Params.ChannelId = v
 				}
 
+				// Got channel_id, re-process the entire post
+				// in the streaming mode.
+				if mode == bufferedMode {
+					r.Body = ioutil.NopCloser(io.MultiReader(buf, r.Body))
+					defer func() {
+						r.Body = prevBody
+					}()
+					return uploadFileMultipart(c, r, timestamp, streamMode)
+				}
+
 			case "client_ids":
-				haveClientIds = true
+				if !expectClientIds {
+					c.SetInvalidParam("client_ids")
+					return nil
+				}
 				clientIds = append(clientIds, v)
 
 			default:
@@ -278,7 +334,25 @@ func uploadFileMultipart(c *Context, mr *multipart.Reader, timestamp time.Time) 
 			continue
 		}
 
-		// A file part
+		// A file part.
+
+		if c.Params.ChannelId == "" && mode == bufferedMode {
+			// Zero out previous multipartReader so that it can be
+			// obtained again.
+			r.MultipartForm = nil
+
+			r.Body = ioutil.NopCloser(io.MultiReader(buf, r.Body))
+			mr, err = r.MultipartReader()
+			r.Body = prevBody
+			if err != nil {
+				c.Err = model.NewAppError("uploadFileMultipart",
+					"api.file.upload_file.read_request.app_error",
+					nil, err.Error(), http.StatusBadRequest)
+				return nil
+			}
+
+			return uploadFileMultipartBuffered(c, mr, timestamp)
+		}
 
 		c.RequireChannelId()
 		if c.Err != nil {
@@ -289,20 +363,23 @@ func uploadFileMultipart(c *Context, mr *multipart.Reader, timestamp time.Time) 
 			return nil
 		}
 
-		// Must have a exactly one client ID for each file
-		clientId := ""
-		if len(clientIds) > 0 {
-			clientId = clientIds[0]
-			clientIds = clientIds[1:]
-		}
-		if haveClientIds && clientId == "" {
-			c.Err = model.NewAppError("uploadFileMultipart",
-				"api.file.upload_file.incorrect_number_of_files.app_error",
-				nil, "", http.StatusBadRequest)
-			return nil
+		// If there's no clientIds when the first file comes, expect
+		// none later.
+		if nFiles == 0 && len(clientIds) == 0 {
+			expectClientIds = false
 		}
 
-		// do upload
+		// Must have a exactly one client ID for each file.
+		clientId := ""
+		if expectClientIds {
+			if nFiles >= len(clientIds) {
+				c.SetInvalidParam("client_ids")
+				return nil
+			}
+
+			clientId = clientIds[nFiles]
+		}
+
 		info, appErr := c.App.UploadFile(&app.UploadFileContext{
 			Timestamp:     timestamp,
 			TeamId:        FILE_TEAM_ID,
@@ -320,17 +397,104 @@ func uploadFileMultipart(c *Context, mr *multipart.Reader, timestamp time.Time) 
 
 		// add to the response
 		resp.FileInfos = append(resp.FileInfos, info)
-		if haveClientIds {
+		if expectClientIds {
 			resp.ClientIds = append(resp.ClientIds, clientId)
 		}
+
+		nFiles++
 	}
 
-	// Verify that the number of ClientIds matched the number of files
-	if haveClientIds && len(clientIds) != 0 {
+	// Verify that the number of ClientIds matched the number of files.
+	if expectClientIds && len(clientIds) != nFiles {
 		c.Err = model.NewAppError("uploadFileMultipart",
 			"api.file.upload_file.incorrect_number_of_files.app_error",
 			nil, "", http.StatusBadRequest)
 		return nil
+	}
+
+	return &resp
+}
+
+// uploadFileMultipartBuffered reads, buffers, and then uploads the message,
+// borrowing from http.ParseMultipartForm.  If successful it returns a
+// *model.FileUploadResponse filled in with the individual model.FileInfo's.
+func uploadFileMultipartBuffered(c *Context, mr *multipart.Reader,
+	timestamp time.Time) *model.FileUploadResponse {
+
+	// Parse the entire form.
+	form, err := mr.ReadForm(*c.App.Config().FileSettings.MaxFileSize)
+	if err != nil {
+		c.Err = model.NewAppError("uploadFileMultipartiBuffered",
+			"api.file.upload_file.read_request.app_error",
+			nil, err.Error(), http.StatusInternalServerError)
+		return nil
+	}
+
+	// get and validate the channel Id, permission to upload there.
+	if len(form.Value["channel_id"]) == 0 {
+		c.SetInvalidParam("channel_id")
+		return nil
+	}
+	channelId := form.Value["channel_id"][0]
+	c.Params.ChannelId = channelId
+	c.RequireChannelId()
+	if c.Err != nil {
+		return nil
+	}
+	if !c.App.SessionHasPermissionToChannel(c.Session, channelId, model.PERMISSION_UPLOAD_FILE) {
+		c.SetPermissionError(model.PERMISSION_UPLOAD_FILE)
+		return nil
+	}
+
+	// Check that we have either no client IDs, or one per file.
+	clientIds := form.Value["client_ids"]
+	fileHeaders := form.File["files"]
+	if len(clientIds) != 0 && len(clientIds) != len(fileHeaders) {
+		c.Err = model.NewAppError("uploadFilesMultipartiBuffered",
+			"api.file.upload_file.incorrect_number_of_files.app_error",
+			nil, "", http.StatusBadRequest)
+		return nil
+	}
+
+	resp := model.FileUploadResponse{
+		FileInfos: []*model.FileInfo{},
+		ClientIds: []string{},
+	}
+
+	for i, fileHeader := range fileHeaders {
+		f, err := fileHeader.Open()
+		if err != nil {
+			c.Err = model.NewAppError("uploadFileMultipartiBuffered",
+				"api.file.upload_file.read_request.app_error",
+				nil, err.Error(), http.StatusInternalServerError)
+			return nil
+		}
+
+		clientId := ""
+		if len(clientIds) > 0 {
+			clientId = clientIds[i]
+		}
+
+		info, appErr := c.App.UploadFile(&app.UploadFileContext{
+			Timestamp:     timestamp,
+			TeamId:        FILE_TEAM_ID,
+			ChannelId:     c.Params.ChannelId,
+			UserId:        c.Session.UserId,
+			ClientId:      clientId,
+			Name:          fileHeader.Filename,
+			ContentLength: -1,
+			Input:         f,
+		})
+		f.Close()
+		if appErr != nil {
+			c.Err = appErr
+			return nil
+		}
+
+		resp.FileInfos = append(resp.FileInfos, info)
+		if clientId != "" {
+			resp.ClientIds = append(resp.ClientIds, clientId)
+		}
 	}
 
 	return &resp

@@ -1121,8 +1121,8 @@
     "translation": "Bad connection to S3 or minio."
   },
   {
-    "id": "api.file.upload_file.bad_parse.app_error",
-    "translation": "Unable to upload file. Header cannot be parsed."
+    "id": "api.file.upload_file.read_request.app_error",
+    "translation": "Unable to upload file. Error while reading or parsing request."
   },
   {
     "id": "api.file.upload_file.incorrect_number_of_files.app_error",
@@ -1139,10 +1139,6 @@
   {
     "id": "api.file.upload_file.too_large.app_error",
     "translation": "Unable to upload file. File is too large."
-  },
-  {
-    "id": "api.file.upload_file.error_read_part.app_error",
-    "translation": "Unable to read mime/multipart message from the client."
   },
   {
     "id": "api.file.write_file.s3.app_error",

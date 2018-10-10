@@ -187,23 +187,13 @@ func TestUploadFileAsMultipart(t *testing.T) {
 	CheckForbiddenStatus(t, resp)
 
 	_, resp = Client.UploadFile(data, "../../junk", "test.png")
-	if resp.StatusCode == 0 {
-		t.Log("file upload request failed completely")
-	} else if resp.StatusCode != http.StatusBadRequest {
-		// This should return an HTTP 400, but it occasionally causes the http client itself to error
-		t.Fatalf("should've returned HTTP 400 or failed completely, got %v instead", resp.StatusCode)
-	}
+	CheckBadRequestStatus(t, resp)
 
 	_, resp = th.SystemAdminClient.UploadFile(data, model.NewId(), "test.png")
 	CheckForbiddenStatus(t, resp)
 
 	_, resp = th.SystemAdminClient.UploadFile(data, "../../junk", "test.png")
-	if resp.StatusCode == 0 {
-		t.Log("file upload request failed completely")
-	} else if resp.StatusCode != http.StatusBadRequest {
-		// This should return an HTTP 400, but it occasionally causes the http client itself to error
-		t.Fatalf("should've returned HTTP 400 or failed completely, got %v instead", resp.StatusCode)
-	}
+	CheckBadRequestStatus(t, resp)
 
 	_, resp = th.SystemAdminClient.UploadFile(data, channel.Id, "test.png")
 	CheckNoError(t, resp)
@@ -215,12 +205,7 @@ func TestUploadFileAsMultipart(t *testing.T) {
 	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.EnableFileAttachments = false })
 
 	_, resp = th.SystemAdminClient.UploadFile(data, channel.Id, "test.png")
-	if resp.StatusCode == 0 {
-		t.Log("file upload request failed completely")
-	} else if resp.StatusCode != http.StatusNotImplemented {
-		// This should return an HTTP 501, but it occasionally causes the http client itself to error
-		t.Fatalf("should've returned HTTP 501 or failed completely, got %v instead", resp.StatusCode)
-	}
+	CheckNotImplementedStatus(t, resp)
 }
 
 func TestUploadFileAsRequestBody(t *testing.T) {
@@ -310,23 +295,13 @@ func TestUploadFileAsRequestBody(t *testing.T) {
 	CheckForbiddenStatus(t, resp)
 
 	_, resp = Client.UploadFileAsRequestBody(data, "../../junk", "test.png")
-	if resp.StatusCode == 0 {
-		t.Log("file upload request failed completely")
-	} else if resp.StatusCode != http.StatusBadRequest {
-		// This should return an HTTP 400, but it occasionally causes the http client itself to error
-		t.Fatalf("should've returned HTTP 400 or failed completely, got %v instead", resp.StatusCode)
-	}
+	CheckBadRequestStatus(t, resp)
 
 	_, resp = th.SystemAdminClient.UploadFileAsRequestBody(data, model.NewId(), "test.png")
 	CheckForbiddenStatus(t, resp)
 
 	_, resp = th.SystemAdminClient.UploadFileAsRequestBody(data, "../../junk", "test.png")
-	if resp.StatusCode == 0 {
-		t.Log("file upload request failed completely")
-	} else if resp.StatusCode != http.StatusBadRequest {
-		// This should return an HTTP 400, but it occasionally causes the http client itself to error
-		t.Fatalf("should've returned HTTP 400 or failed completely, got %v instead", resp.StatusCode)
-	}
+	CheckBadRequestStatus(t, resp)
 
 	_, resp = th.SystemAdminClient.UploadFileAsRequestBody(data, channel.Id, "test.png")
 	CheckNoError(t, resp)
@@ -338,12 +313,7 @@ func TestUploadFileAsRequestBody(t *testing.T) {
 	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.EnableFileAttachments = false })
 
 	_, resp = th.SystemAdminClient.UploadFileAsRequestBody(data, channel.Id, "test.png")
-	if resp.StatusCode == 0 {
-		t.Log("file upload request failed completely")
-	} else if resp.StatusCode != http.StatusNotImplemented {
-		// This should return an HTTP 501, but it occasionally causes the http client itself to error
-		t.Fatalf("should've returned HTTP 501 or failed completely, got %v instead", resp.StatusCode)
-	}
+	CheckNotImplementedStatus(t, resp)
 }
 
 func TestGetFile(t *testing.T) {

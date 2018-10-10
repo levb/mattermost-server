@@ -173,9 +173,15 @@ func TestUploadFile(t *testing.T) {
 			f: func(t *testing.T,
 				timestamp time.Time, filename string, data []byte, expectedPathPrefix string) {
 
-				info, err := th.App.UploadFile(timestamp, "../../"+teamId,
-					"../../"+channelId, "../../"+userId, "", "../../"+filename,
-					-1, bytes.NewReader(data))
+				info, err := th.App.UploadFile(&UploadFileContext{
+					Timestamp:     timestamp,
+					TeamId:        "../../" + teamId,
+					ChannelId:     "../../" + channelId,
+					UserId:        "../../" + userId,
+					Name:          "../../" + filename,
+					ContentLength: -1,
+					Input:         bytes.NewReader(data),
+				})
 
 				if err != nil {
 					t.Fatal(err)
