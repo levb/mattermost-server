@@ -10,7 +10,10 @@ import (
 	"io/ioutil"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -468,7 +471,14 @@ func (c *Client4) doApiRequestReader(method, url string, data io.Reader, etag st
 }
 
 func (c *Client4) DoUploadFile(url string, data []byte, contentType string) (*FileUploadResponse, *Response) {
-	rq, _ := http.NewRequest("POST", c.ApiUrl+url, bytes.NewReader(data))
+	return c.doUploadFile(url, bytes.NewReader(data), contentType, 0)
+}
+
+func (c *Client4) doUploadFile(url string, body io.Reader, contentType string, contentLength int64) (*FileUploadResponse, *Response) {
+	rq, _ := http.NewRequest("POST", c.ApiUrl+url, body)
+	if contentLength != 0 {
+		rq.ContentLength = contentLength
+	}
 	rq.Header.Set("Content-Type", contentType)
 
 	if len(c.AuthToken) > 0 {
@@ -2246,6 +2256,181 @@ func (c *Client4) DoPostAction(postId, actionId string) (bool, *Response) {
 }
 
 // File Section
+var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
+
+func escapeQuotes(s string) string {
+	return quoteEscaper.Replace(s)
+}
+
+func (c *Client4) UploadLocalFiles(channelId string, filepaths []string, names []string,
+	clientIds []string, useMultipart bool) (*FileUploadResponse, *Response) {
+	return c.uploadFiles(channelId, filepaths, names, nil, nil, clientIds, useMultipart, true)
+}
+
+func (c *Client4) UploadFiles(channelId string, names []string, files []io.Reader,
+	contentLengths []int64, clientIds []string, useMultipart bool) (*FileUploadResponse, *Response) {
+	return c.uploadFiles(channelId, nil, names, files, contentLengths, clientIds, useMultipart, false)
+}
+
+func (c *Client4) uploadFiles(
+	channelId string,
+	filepaths []string,
+	names []string,
+	files []io.Reader,
+	contentLengths []int64,
+	clientIds []string,
+	useMultipart bool,
+	useLocalFiles bool) (*FileUploadResponse, *Response) {
+
+	// Do not check len(clientIds), leave it entirely to the user to
+	// provide. The server will error out if it does not match the number
+	// of files, but it's not critical here.
+	if useLocalFiles && len(filepaths) == 0 ||
+		!useLocalFiles && (len(names) == 0 || len(files) == 0 || len(names) != len(files)) {
+		return nil, &Response{
+			Error: NewAppError("UploadFiles",
+				"model.client.upload_post_attachment.file.app_error",
+				nil, "Empty or mismatched file data", http.StatusBadRequest),
+		}
+	}
+
+	// emergencyResponse is a convenience wrapper to return an error response
+	emergencyResponse := func(err error, errCode string) *Response {
+		return &Response{
+			Error: NewAppError("UploadFiles",
+				"model.client."+errCode+".app_error",
+				nil, err.Error(), http.StatusBadRequest),
+		}
+	}
+
+	// For multipart, start writing the request as a goroutine, and pipe
+	// multipart.Writer into it, otherwise generate a new request each
+	// time.
+	pipeReader, pipeWriter := io.Pipe()
+	mw := multipart.NewWriter(pipeWriter)
+
+	fileUploadResponse := &FileUploadResponse{}
+	response := (*Response)(nil)
+	fileUploadResponseChannel := make(chan *FileUploadResponse)
+	responseChannel := make(chan *Response)
+
+	if useMultipart {
+		go func() {
+			fur, resp := c.doUploadFile(c.GetFilesRoute(), pipeReader, mw.FormDataContentType(), 0)
+			fileUploadResponseChannel <- fur
+			responseChannel <- resp
+		}()
+
+		err := mw.WriteField("channel_id", channelId)
+		if err != nil {
+			return nil, emergencyResponse(err, "upload_post_attachment.channel_id")
+		}
+	}
+
+	i := 0
+	nFiles := len(files)
+	if useLocalFiles {
+		nFiles = len(filepaths)
+	}
+	f := io.ReadCloser(nil)
+	cl := int64(0)
+	name := ""
+	data := make([]byte, 512)
+	for i = 0; i < nFiles; i++ {
+		if useLocalFiles {
+			fi, err := os.Stat(filepaths[i])
+			if err != nil {
+				return nil, emergencyResponse(err, "upload_post_attachment")
+			}
+			cl = fi.Size()
+
+			if len(names) > i && names[i] != "" {
+				name = names[i]
+			} else {
+				_, name = filepath.Split(filepaths[i])
+			}
+
+			f, err = os.Open(filepaths[i])
+			if err != nil {
+				return nil, emergencyResponse(err, "upload_post_attachment")
+			}
+		} else {
+			if len(contentLengths) > i {
+				cl = contentLengths[i]
+			}
+			name = names[i]
+			f = ioutil.NopCloser(files[i])
+		}
+
+		n, err := f.Read(data)
+		if err != nil && err != io.EOF {
+			return nil, emergencyResponse(err, "upload_post_attachment")
+		}
+		ct := http.DetectContentType(data[:n])
+		reader := io.MultiReader(bytes.NewReader(data[:n]), f)
+
+		if useMultipart {
+			if len(clientIds) > i {
+				err := mw.WriteField("client_id", clientIds[i])
+				if err != nil {
+					return nil, emergencyResponse(err, "upload_post_attachment.file")
+				}
+			}
+
+			h := make(textproto.MIMEHeader)
+			h.Set("Content-Disposition",
+				fmt.Sprintf(`form-data; name="files"; filename="%s"`, escapeQuotes(name)))
+			h.Set("Content-Type", ct)
+
+			part, err := mw.CreatePart(h)
+			if err != nil {
+				return nil, emergencyResponse(err, "upload_post_attachment.writer")
+			}
+
+			_, err = io.Copy(part, reader)
+			if err != nil {
+				return nil, emergencyResponse(err, "upload_post_attachment.writer")
+			}
+		} else {
+			postURL := c.GetFilesRoute() +
+				fmt.Sprintf("?channel_id=%v", url.QueryEscape(channelId)) +
+				fmt.Sprintf("&filename=%v", url.QueryEscape(name))
+			if len(clientIds) < i {
+				postURL += fmt.Sprintf("&client_id=%v", url.QueryEscape(clientIds[i]))
+			}
+			fur, resp := c.doUploadFile(postURL, reader, ct, cl)
+			if resp.Error != nil {
+				return nil, resp
+			}
+			fileUploadResponse.FileInfos = append(fileUploadResponse.FileInfos, fur.FileInfos[0])
+			if len(clientIds) > 0 {
+				if len(fur.ClientIds) > 0 {
+					fileUploadResponse.ClientIds = append(fileUploadResponse.ClientIds, fur.ClientIds[0])
+				} else {
+					fileUploadResponse.ClientIds = append(fileUploadResponse.ClientIds, "")
+				}
+			}
+			response = resp
+		}
+
+		f.Close()
+	}
+
+	if useMultipart {
+		err := mw.Close()
+		if err != nil {
+			return nil, emergencyResponse(err, "upload_post_attachment.writer")
+		}
+		err = pipeWriter.Close()
+		if err != nil {
+			return nil, emergencyResponse(err, "upload_post_attachment.writer")
+		}
+		fileUploadResponse = <-fileUploadResponseChannel
+		response = <-responseChannel
+	}
+
+	return fileUploadResponse, response
+}
 
 // UploadFile will upload a file to a channel using a multipart request, to be later attached to a post.
 // This method is functionally equivalent to Client4.UploadFileAsRequestBody.

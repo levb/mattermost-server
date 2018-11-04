@@ -11,13 +11,16 @@ import (
 	"image/jpeg"
 	"math/rand"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mattermost/mattermost-server/app"
 	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
 	"github.com/mattermost/mattermost-server/store"
+	"github.com/mattermost/mattermost-server/utils"
 )
 
 func BenchmarkUploadImage(b *testing.B) {
@@ -100,220 +103,242 @@ func BenchmarkUploadImage(b *testing.B) {
 		})
 }
 
-func TestUploadFileAsMultipart(t *testing.T) {
-	th := Setup().InitBasic().InitSystemAdmin()
-	defer th.TearDown()
-	Client := th.Client
+func testUploadFile(t *testing.T, client *model.Client4, channelId string, name string,
+	useMultipart bool, check func(t *testing.T, resp *model.Response)) *model.FileInfo {
 
-	user := th.BasicUser
-	channel := th.BasicChannel
-
-	var uploadInfo *model.FileInfo
-	var data []byte
-	var err error
-	if data, err = readTestFile("test.png"); err != nil {
-		t.Fatal(err)
-	} else if fileResp, resp := Client.UploadFile(data, channel.Id, "test.png"); resp.Error != nil {
-		t.Fatal(resp.Error)
-	} else if len(fileResp.FileInfos) != 1 {
-		t.Fatal("should've returned a single file infos")
-	} else {
-		uploadInfo = fileResp.FileInfos[0]
+	fileResp := testUploadFiles(t, client, channelId, []string{name}, useMultipart, check)
+	if fileResp == nil || len(fileResp.FileInfos) == 0 {
+		return nil
 	}
-
-	// The returned file info from the upload call will be missing some fields that will be stored in the database
-	if uploadInfo.CreatorId != user.Id {
-		t.Fatal("file should be assigned to user")
-	} else if uploadInfo.PostId != "" {
-		t.Fatal("file shouldn't have a post")
-	} else if uploadInfo.Path != "" {
-		t.Fatal("file path should not be set on returned info")
-	} else if uploadInfo.ThumbnailPath != "" {
-		t.Fatal("file thumbnail path should not be set on returned info")
-	} else if uploadInfo.PreviewPath != "" {
-		t.Fatal("file preview path should not be set on returned info")
-	}
-
-	var info *model.FileInfo
-	if result := <-th.App.Srv.Store.FileInfo().Get(uploadInfo.Id); result.Err != nil {
-		t.Fatal(result.Err)
-	} else {
-		info = result.Data.(*model.FileInfo)
-	}
-
-	if info.Id != uploadInfo.Id {
-		t.Fatal("file id from response should match one stored in database")
-	} else if info.CreatorId != user.Id {
-		t.Fatal("file should be assigned to user")
-	} else if info.PostId != "" {
-		t.Fatal("file shouldn't have a post")
-	} else if info.Path == "" {
-		t.Fatal("file path should be set in database")
-	} else if info.ThumbnailPath == "" {
-		t.Fatal("file thumbnail path should be set in database")
-	} else if info.PreviewPath == "" {
-		t.Fatal("file preview path should be set in database")
-	}
-
-	date := time.Now().Format("20060102")
-
-	// This also makes sure that the relative path provided above is sanitized out
-	expectedPath := fmt.Sprintf("%v/teams/%v/channels/%v/users/%v/%v/test.png", date, FILE_TEAM_ID, channel.Id, user.Id, info.Id)
-	if info.Path != expectedPath {
-		t.Logf("file is saved in %v", info.Path)
-		t.Fatalf("file should've been saved in %v", expectedPath)
-	}
-
-	expectedThumbnailPath := fmt.Sprintf("%v/teams/%v/channels/%v/users/%v/%v/test_thumb.jpg", date, FILE_TEAM_ID, channel.Id, user.Id, info.Id)
-	if info.ThumbnailPath != expectedThumbnailPath {
-		t.Logf("file thumbnail is saved in %v", info.ThumbnailPath)
-		t.Fatalf("file thumbnail should've been saved in %v", expectedThumbnailPath)
-	}
-
-	expectedPreviewPath := fmt.Sprintf("%v/teams/%v/channels/%v/users/%v/%v/test_preview.jpg", date, FILE_TEAM_ID, channel.Id, user.Id, info.Id)
-	if info.PreviewPath != expectedPreviewPath {
-		t.Logf("file preview is saved in %v", info.PreviewPath)
-		t.Fatalf("file preview should've been saved in %v", expectedPreviewPath)
-	}
-
-	// Wait a bit for files to ready
-	time.Sleep(2 * time.Second)
-
-	if err := th.cleanupTestFile(info); err != nil {
-		t.Fatal(err)
-	}
-
-	_, resp := Client.UploadFile(data, model.NewId(), "test.png")
-	CheckForbiddenStatus(t, resp)
-
-	_, resp = Client.UploadFile(data, "../../junk", "test.png")
-	CheckBadRequestStatus(t, resp)
-
-	_, resp = th.SystemAdminClient.UploadFile(data, model.NewId(), "test.png")
-	CheckForbiddenStatus(t, resp)
-
-	_, resp = th.SystemAdminClient.UploadFile(data, "../../junk", "test.png")
-	CheckBadRequestStatus(t, resp)
-
-	_, resp = th.SystemAdminClient.UploadFile(data, channel.Id, "test.png")
-	CheckNoError(t, resp)
-
-	enableFileAttachments := *th.App.Config().FileSettings.EnableFileAttachments
-	defer func() {
-		th.App.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.EnableFileAttachments = enableFileAttachments })
-	}()
-	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.EnableFileAttachments = false })
-
-	_, resp = th.SystemAdminClient.UploadFile(data, channel.Id, "test.png")
-	CheckNotImplementedStatus(t, resp)
+	return fileResp.FileInfos[0]
 }
 
-func TestUploadFileAsRequestBody(t *testing.T) {
+func testUploadFiles(t *testing.T, client *model.Client4, channelId string, names []string, useMultipart bool,
+	check func(t *testing.T, resp *model.Response)) *model.FileUploadResponse {
+
+	dir, _ := utils.FindDir("tests")
+	paths := []string{}
+
+	for _, name := range names {
+		paths = append(paths, filepath.Join(dir, name))
+	}
+
+	fileResp, resp := client.UploadLocalFiles(channelId, paths, nil, nil, useMultipart)
+
+	if check != nil {
+		check(t, resp)
+	}
+	if fileResp == nil {
+		return nil
+	}
+	if len(fileResp.FileInfos) != len(names) {
+		t.Fatalf("Expected %v FileInfos, got %v", len(names), len(fileResp.FileInfos))
+	}
+	return fileResp
+}
+
+// returns a slice of complete FileInfos from the database, if appropriate
+func testCheckFileUploadResponseHappy(tb testing.TB, th *TestHelper, resp, expected *model.FileUploadResponse) []*model.FileInfo {
+	if resp == nil || expected == nil || len(resp.FileInfos) == 0 ||
+		len(resp.FileInfos) != len(expected.FileInfos) {
+		tb.Fatal("Empty or mismatched actual or expected FileInfos")
+	}
+
+	dbInfos := []*model.FileInfo{}
+	for i, ri := range resp.FileInfos {
+		ei := expected.FileInfos[i]
+		// The returned file info from the upload call will be missing some fields that will be stored in the database
+		if ri.CreatorId != ei.CreatorId {
+			tb.Error("file should be assigned to user")
+		} else if ri.PostId != "" {
+			tb.Error("file shouldn'tb have a post")
+		} else if ri.Path != "" {
+			tb.Error("file path should not be set on returned info")
+		} else if ri.ThumbnailPath != "" {
+			tb.Error("file thumbnail path should not be set on returned info")
+		} else if ri.PreviewPath != "" {
+			tb.Error("file preview path should not be set on returned info")
+		}
+
+		var dbInfo *model.FileInfo
+		result := <-th.App.Srv.Store.FileInfo().Get(ri.Id)
+		if result.Err != nil {
+			tb.Error(result.Err)
+		} else {
+			dbInfo = result.Data.(*model.FileInfo)
+		}
+
+		if dbInfo.Id != ri.Id {
+			tb.Fatal("file id from response should match one stored in database")
+		} else if dbInfo.CreatorId != ei.CreatorId {
+			tb.Fatal("file should be assigned to user")
+		} else if dbInfo.PostId != "" {
+			tb.Fatal("file shouldn'tb have a post")
+		} else if dbInfo.Path == "" {
+			tb.Fatal("file path should be set in database")
+		} else if dbInfo.ThumbnailPath == "" {
+			tb.Fatal("file thumbnail path should be set in database")
+		} else if dbInfo.PreviewPath == "" {
+			tb.Fatal("file preview path should be set in database")
+		}
+
+		_, fname := filepath.Split(dbInfo.Path)
+		ext := filepath.Ext(fname)
+		name := fname[:len(fname)-len(ext)]
+
+		expectedDir := fmt.Sprintf(ei.Path+"%s/%s", ri.CreatorId, ri.Id)
+		expectedPath := fmt.Sprintf("%s/%s", expectedDir, fname)
+		expectedThumbnailPath := fmt.Sprintf("%s/%s_thumb.jpg", expectedDir, name)
+		expectedPreviewPath := fmt.Sprintf("%s/%s_preview.jpg", expectedDir, name)
+
+		if dbInfo.Path != expectedPath {
+			tb.Errorf("file %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.Path, expectedPath)
+		}
+		if dbInfo.ThumbnailPath != expectedThumbnailPath {
+			tb.Errorf("file %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.ThumbnailPath, expectedThumbnailPath)
+		}
+		if dbInfo.PreviewPath != expectedPreviewPath {
+			tb.Errorf("file %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.PreviewPath, expectedPreviewPath)
+		}
+
+		dbInfos = append(dbInfos, dbInfo)
+	}
+
+	return dbInfos
+}
+
+func TestUploadFiles(t *testing.T) {
 	th := Setup().InitBasic().InitSystemAdmin()
 	defer th.TearDown()
-	Client := th.Client
-
-	user := th.BasicUser
 	channel := th.BasicChannel
-
-	var uploadInfo *model.FileInfo
-	var data []byte
-	var err error
-	if data, err = readTestFile("test.png"); err != nil {
-		t.Fatal(err)
-	} else if fileResp, resp := Client.UploadFileAsRequestBody(data, channel.Id, "test.png"); resp.Error != nil {
-		t.Fatal(resp.Error)
-	} else if len(fileResp.FileInfos) != 1 {
-		t.Fatal("should've returned a single file infos")
-	} else {
-		uploadInfo = fileResp.FileInfos[0]
-	}
-
-	// The returned file info from the upload call will be missing some fields that will be stored in the database
-	if uploadInfo.CreatorId != user.Id {
-		t.Fatal("file should be assigned to user")
-	} else if uploadInfo.PostId != "" {
-		t.Fatal("file shouldn't have a post")
-	} else if uploadInfo.Path != "" {
-		t.Fatal("file path should not be set on returned info")
-	} else if uploadInfo.ThumbnailPath != "" {
-		t.Fatal("file thumbnail path should not be set on returned info")
-	} else if uploadInfo.PreviewPath != "" {
-		t.Fatal("file preview path should not be set on returned info")
-	}
-
-	var info *model.FileInfo
-	if result := <-th.App.Srv.Store.FileInfo().Get(uploadInfo.Id); result.Err != nil {
-		t.Fatal(result.Err)
-	} else {
-		info = result.Data.(*model.FileInfo)
-	}
-
-	if info.Id != uploadInfo.Id {
-		t.Fatal("file id from response should match one stored in database")
-	} else if info.CreatorId != user.Id {
-		t.Fatal("file should be assigned to user")
-	} else if info.PostId != "" {
-		t.Fatal("file shouldn't have a post")
-	} else if info.Path == "" {
-		t.Fatal("file path should be set in database")
-	} else if info.ThumbnailPath == "" {
-		t.Fatal("file thumbnail path should be set in database")
-	} else if info.PreviewPath == "" {
-		t.Fatal("file preview path should be set in database")
-	}
-
 	date := time.Now().Format("20060102")
 
-	// This also makes sure that the relative path provided above is sanitized out
-	expectedPath := fmt.Sprintf("%v/teams/%v/channels/%v/users/%v/%v/test.png", date, FILE_TEAM_ID, channel.Id, user.Id, info.Id)
-	if info.Path != expectedPath {
-		t.Logf("file is saved in %v", info.Path)
-		t.Fatalf("file should've been saved in %v", expectedPath)
+	tests := []struct {
+		title                   string
+		filenames               []string
+		client                  *model.Client4
+		channelId               string
+		setupConfig             func(a *app.App) func(a *app.App)
+		checkResponse           func(t *testing.T, resp *model.Response)
+		checkFileUploadResponse func(tb testing.TB, th *TestHelper, resp, expected *model.FileUploadResponse) []*model.FileInfo
+		expected                *model.FileUploadResponse
+	}{
+		{
+			title:                   "basic",
+			filenames:               []string{"test.png"},
+			checkResponse:           CheckNoError,
+			checkFileUploadResponse: testCheckFileUploadResponseHappy,
+			expected: &model.FileUploadResponse{FileInfos: []*model.FileInfo{
+				&model.FileInfo{
+					CreatorId: th.BasicUser.Id,
+					// used as a prefix, filled in by testCheckFileUploadResponseHappy
+					Path: fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
+				}},
+			},
+		},
+		{
+			title:         "basic channelId does not exist",
+			channelId:     model.NewId(),
+			filenames:     []string{"test.png"},
+			checkResponse: CheckForbiddenStatus,
+		},
+		{
+			title:         "basic invalid channelId",
+			channelId:     "../../junk",
+			filenames:     []string{"test.png"},
+			checkResponse: CheckBadRequestStatus,
+		},
+		{
+			title:                   "admin",
+			client:                  th.SystemAdminClient,
+			filenames:               []string{"test.png"},
+			checkResponse:           CheckNoError,
+			checkFileUploadResponse: testCheckFileUploadResponseHappy,
+			expected: &model.FileUploadResponse{FileInfos: []*model.FileInfo{
+				&model.FileInfo{
+					CreatorId: th.SystemAdminUser.Id,
+					Path:      fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
+				}},
+			},
+		},
+		{
+			title:         "admin channelId does not exist",
+			client:        th.SystemAdminClient,
+			channelId:     model.NewId(),
+			filenames:     []string{"test.png"},
+			checkResponse: CheckForbiddenStatus,
+		},
+		{
+			title:         "admin invalid channelId",
+			client:        th.SystemAdminClient,
+			channelId:     "../../junk",
+			filenames:     []string{"test.png"},
+			checkResponse: CheckBadRequestStatus,
+		},
+		{
+			title:         "admin disabled",
+			client:        th.SystemAdminClient,
+			filenames:     []string{"test.png"},
+			checkResponse: CheckNotImplementedStatus,
+			setupConfig: func(a *app.App) func(a *app.App) {
+				enableFileAttachments := *a.Config().FileSettings.EnableFileAttachments
+				a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.EnableFileAttachments = false })
+				return func(a *app.App) {
+					a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.EnableFileAttachments = enableFileAttachments })
+				}
+			},
+		},
 	}
 
-	expectedThumbnailPath := fmt.Sprintf("%v/teams/%v/channels/%v/users/%v/%v/test_thumb.jpg", date, FILE_TEAM_ID, channel.Id, user.Id, info.Id)
-	if info.ThumbnailPath != expectedThumbnailPath {
-		t.Logf("file thumbnail is saved in %v", info.ThumbnailPath)
-		t.Fatalf("file thumbnail should've been saved in %v", expectedThumbnailPath)
+	for _, useMultipart := range []bool{true, false} {
+		for _, tc := range tests {
+			title := ""
+			if tc.title != "" {
+				title = tc.title + " "
+			}
+			title += fmt.Sprintf("%v", tc.filenames)
+			if useMultipart {
+				title += " simple POST"
+			}
+
+			client := th.Client
+			if tc.client != nil {
+				client = tc.client
+			}
+			channelId := channel.Id
+			if tc.channelId != "" {
+				channelId = tc.channelId
+			}
+
+			var restoreConfig func(a *app.App)
+			if tc.setupConfig != nil {
+				restoreConfig = tc.setupConfig(th.App)
+			}
+
+			t.Run(title, func(t *testing.T) {
+				fileUploadResponse := testUploadFiles(t, client, channelId, tc.filenames,
+					useMultipart, tc.checkResponse)
+
+				dbInfos := []*model.FileInfo{}
+				if tc.checkFileUploadResponse != nil {
+					dbInfos = tc.checkFileUploadResponse(t, th, fileUploadResponse, tc.expected)
+				}
+
+				if fileUploadResponse != nil {
+					for _, fi := range dbInfos {
+						err := th.cleanupTestFile(fi)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			})
+
+			if restoreConfig != nil {
+				restoreConfig(th.App)
+			}
+		}
 	}
-
-	expectedPreviewPath := fmt.Sprintf("%v/teams/%v/channels/%v/users/%v/%v/test_preview.jpg", date, FILE_TEAM_ID, channel.Id, user.Id, info.Id)
-	if info.PreviewPath != expectedPreviewPath {
-		t.Logf("file preview is saved in %v", info.PreviewPath)
-		t.Fatalf("file preview should've been saved in %v", expectedPreviewPath)
-	}
-
-	// Wait a bit for files to ready
-	time.Sleep(2 * time.Second)
-
-	if err := th.cleanupTestFile(info); err != nil {
-		t.Fatal(err)
-	}
-
-	_, resp := Client.UploadFileAsRequestBody(data, model.NewId(), "test.png")
-	CheckForbiddenStatus(t, resp)
-
-	_, resp = Client.UploadFileAsRequestBody(data, "../../junk", "test.png")
-	CheckBadRequestStatus(t, resp)
-
-	_, resp = th.SystemAdminClient.UploadFileAsRequestBody(data, model.NewId(), "test.png")
-	CheckForbiddenStatus(t, resp)
-
-	_, resp = th.SystemAdminClient.UploadFileAsRequestBody(data, "../../junk", "test.png")
-	CheckBadRequestStatus(t, resp)
-
-	_, resp = th.SystemAdminClient.UploadFileAsRequestBody(data, channel.Id, "test.png")
-	CheckNoError(t, resp)
-
-	enableFileAttachments := *th.App.Config().FileSettings.EnableFileAttachments
-	defer func() {
-		th.App.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.EnableFileAttachments = enableFileAttachments })
-	}()
-	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.EnableFileAttachments = false })
-
-	_, resp = th.SystemAdminClient.UploadFileAsRequestBody(data, channel.Id, "test.png")
-	CheckNotImplementedStatus(t, resp)
 }
 
 func TestGetFile(t *testing.T) {
