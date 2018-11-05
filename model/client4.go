@@ -2395,7 +2395,7 @@ func (c *Client4) uploadFiles(
 			postURL := c.GetFilesRoute() +
 				fmt.Sprintf("?channel_id=%v", url.QueryEscape(channelId)) +
 				fmt.Sprintf("&filename=%v", url.QueryEscape(name))
-			if len(clientIds) < i {
+			if len(clientIds) > i {
 				postURL += fmt.Sprintf("&client_id=%v", url.QueryEscape(clientIds[i]))
 			}
 			fur, resp := c.doUploadFile(postURL, reader, ct, cl)

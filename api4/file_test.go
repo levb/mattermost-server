@@ -9,8 +9,10 @@ import (
 	"image"
 	"image/gif"
 	"image/jpeg"
+	"io/ioutil"
 	"math/rand"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -103,18 +105,18 @@ func BenchmarkUploadImage(b *testing.B) {
 		})
 }
 
-func testUploadFile(t *testing.T, client *model.Client4, channelId string, name string,
-	useMultipart bool, check func(t *testing.T, resp *model.Response)) *model.FileInfo {
+func testUploadLocalFile(t *testing.T, client *model.Client4, channelId string, name string,
+	useMultipart bool, check func(t *testing.T, resp *model.Response), validatePayload bool) *model.FileInfo {
 
-	fileResp := testUploadFiles(t, client, channelId, []string{name}, useMultipart, check)
+	fileResp := testUploadLocalFiles(t, client, channelId, []string{name}, useMultipart, check, validatePayload)
 	if fileResp == nil || len(fileResp.FileInfos) == 0 {
 		return nil
 	}
 	return fileResp.FileInfos[0]
 }
 
-func testUploadFiles(t *testing.T, client *model.Client4, channelId string, names []string, useMultipart bool,
-	check func(t *testing.T, resp *model.Response)) *model.FileUploadResponse {
+func testUploadLocalFiles(t *testing.T, client *model.Client4, channelId string, names []string, useMultipart bool,
+	checkResponse func(t *testing.T, resp *model.Response), validatePayloads bool) *model.FileUploadResponse {
 
 	dir, _ := utils.FindDir("tests")
 	paths := []string{}
@@ -125,86 +127,46 @@ func testUploadFiles(t *testing.T, client *model.Client4, channelId string, name
 
 	fileResp, resp := client.UploadLocalFiles(channelId, paths, nil, nil, useMultipart)
 
-	if check != nil {
-		check(t, resp)
+	if checkResponse != nil {
+		checkResponse(t, resp)
 	}
 	if fileResp == nil {
 		return nil
 	}
 	if len(fileResp.FileInfos) != len(names) {
-		t.Fatalf("Expected %v FileInfos, got %v", len(names), len(fileResp.FileInfos))
+		t.Errorf("Expected %v FileInfos, got %v", len(names), len(fileResp.FileInfos))
+	}
+	if !validatePayloads {
+		return fileResp
+	}
+
+	for i, fi := range fileResp.FileInfos {
+		f, _ := os.Open(paths[i])
+		expected, _ := ioutil.ReadAll(f)
+		f.Close()
+
+		data, resp := client.GetFile(fi.Id)
+		CheckNoError(t, resp)
+
+		if bytes.Compare(data, expected) != 0 {
+			t.Errorf("Mismatched payload")
+		}
 	}
 	return fileResp
 }
 
-// returns a slice of complete FileInfos from the database, if appropriate
-func testCheckFileUploadResponseHappy(tb testing.TB, th *TestHelper, resp, expected *model.FileUploadResponse) []*model.FileInfo {
-	if resp == nil || expected == nil || len(resp.FileInfos) == 0 ||
-		len(resp.FileInfos) != len(expected.FileInfos) {
-		tb.Fatal("Empty or mismatched actual or expected FileInfos")
+func checkCond(tb testing.TB, cond bool, text string) {
+	if !cond {
+		tb.Error(text)
 	}
+}
 
-	dbInfos := []*model.FileInfo{}
-	for i, ri := range resp.FileInfos {
-		ei := expected.FileInfos[i]
-		// The returned file info from the upload call will be missing some fields that will be stored in the database
-		if ri.CreatorId != ei.CreatorId {
-			tb.Error("file should be assigned to user")
-		} else if ri.PostId != "" {
-			tb.Error("file shouldn'tb have a post")
-		} else if ri.Path != "" {
-			tb.Error("file path should not be set on returned info")
-		} else if ri.ThumbnailPath != "" {
-			tb.Error("file thumbnail path should not be set on returned info")
-		} else if ri.PreviewPath != "" {
-			tb.Error("file preview path should not be set on returned info")
-		}
+func checkEq(tb testing.TB, v1, v2 interface{}, text string) {
+	checkCond(tb, fmt.Sprintf("%+v", v1) == fmt.Sprintf("%+v", v2), text)
+}
 
-		var dbInfo *model.FileInfo
-		result := <-th.App.Srv.Store.FileInfo().Get(ri.Id)
-		if result.Err != nil {
-			tb.Error(result.Err)
-		} else {
-			dbInfo = result.Data.(*model.FileInfo)
-		}
-
-		if dbInfo.Id != ri.Id {
-			tb.Fatal("file id from response should match one stored in database")
-		} else if dbInfo.CreatorId != ei.CreatorId {
-			tb.Fatal("file should be assigned to user")
-		} else if dbInfo.PostId != "" {
-			tb.Fatal("file shouldn'tb have a post")
-		} else if dbInfo.Path == "" {
-			tb.Fatal("file path should be set in database")
-		} else if dbInfo.ThumbnailPath == "" {
-			tb.Fatal("file thumbnail path should be set in database")
-		} else if dbInfo.PreviewPath == "" {
-			tb.Fatal("file preview path should be set in database")
-		}
-
-		_, fname := filepath.Split(dbInfo.Path)
-		ext := filepath.Ext(fname)
-		name := fname[:len(fname)-len(ext)]
-
-		expectedDir := fmt.Sprintf(ei.Path+"%s/%s", ri.CreatorId, ri.Id)
-		expectedPath := fmt.Sprintf("%s/%s", expectedDir, fname)
-		expectedThumbnailPath := fmt.Sprintf("%s/%s_thumb.jpg", expectedDir, name)
-		expectedPreviewPath := fmt.Sprintf("%s/%s_preview.jpg", expectedDir, name)
-
-		if dbInfo.Path != expectedPath {
-			tb.Errorf("file %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.Path, expectedPath)
-		}
-		if dbInfo.ThumbnailPath != expectedThumbnailPath {
-			tb.Errorf("file %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.ThumbnailPath, expectedThumbnailPath)
-		}
-		if dbInfo.PreviewPath != expectedPreviewPath {
-			tb.Errorf("file %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.PreviewPath, expectedPreviewPath)
-		}
-
-		dbInfos = append(dbInfos, dbInfo)
-	}
-
-	return dbInfos
+func checkNeq(tb testing.TB, v1, v2 interface{}, text string) {
+	checkCond(tb, fmt.Sprintf("%+v", v1) != fmt.Sprintf("%+v", v2), text)
 }
 
 func TestUploadFiles(t *testing.T) {
@@ -214,27 +176,33 @@ func TestUploadFiles(t *testing.T) {
 	date := time.Now().Format("20060102")
 
 	tests := []struct {
-		title                   string
-		filenames               []string
-		client                  *model.Client4
-		channelId               string
-		setupConfig             func(a *app.App) func(a *app.App)
-		checkResponse           func(t *testing.T, resp *model.Response)
-		checkFileUploadResponse func(tb testing.TB, th *TestHelper, resp, expected *model.FileUploadResponse) []*model.FileInfo
-		expected                *model.FileUploadResponse
+		title              string
+		filenames          []string
+		client             *model.Client4
+		channelId          string
+		setupConfig        func(a *app.App) func(a *app.App)
+		checkResponse      func(t *testing.T, resp *model.Response)
+		expectSuccess      bool
+		expectImage        bool
+		expectedCreatorId  string
+		expectedPathPrefix string
 	}{
 		{
-			title:                   "basic",
-			filenames:               []string{"test.png"},
-			checkResponse:           CheckNoError,
-			checkFileUploadResponse: testCheckFileUploadResponseHappy,
-			expected: &model.FileUploadResponse{FileInfos: []*model.FileInfo{
-				&model.FileInfo{
-					CreatorId: th.BasicUser.Id,
-					// used as a prefix, filled in by testCheckFileUploadResponseHappy
-					Path: fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
-				}},
-			},
+			title:              "basic",
+			filenames:          []string{"test.png", "testgif.gif", "testplugin.tar.gz", "test-config.json"},
+			checkResponse:      CheckNoError,
+			expectSuccess:      true,
+			expectedCreatorId:  th.BasicUser.Id,
+			expectedPathPrefix: fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
+		},
+		{
+			title:              "basic images",
+			filenames:          []string{"test.png", "testgif.gif"},
+			checkResponse:      CheckNoError,
+			expectImage:        true,
+			expectSuccess:      true,
+			expectedCreatorId:  th.BasicUser.Id,
+			expectedPathPrefix: fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
 		},
 		{
 			title:         "basic channelId does not exist",
@@ -249,17 +217,13 @@ func TestUploadFiles(t *testing.T) {
 			checkResponse: CheckBadRequestStatus,
 		},
 		{
-			title:                   "admin",
-			client:                  th.SystemAdminClient,
-			filenames:               []string{"test.png"},
-			checkResponse:           CheckNoError,
-			checkFileUploadResponse: testCheckFileUploadResponseHappy,
-			expected: &model.FileUploadResponse{FileInfos: []*model.FileInfo{
-				&model.FileInfo{
-					CreatorId: th.SystemAdminUser.Id,
-					Path:      fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
-				}},
-			},
+			title:              "admin",
+			client:             th.SystemAdminClient,
+			filenames:          []string{"test.png"},
+			checkResponse:      CheckNoError,
+			expectSuccess:      true,
+			expectedCreatorId:  th.SystemAdminUser.Id,
+			expectedPathPrefix: fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
 		},
 		{
 			title:         "admin channelId does not exist",
@@ -293,13 +257,15 @@ func TestUploadFiles(t *testing.T) {
 	for _, useMultipart := range []bool{true, false} {
 		for _, tc := range tests {
 			title := ""
+			if useMultipart {
+				title = "multipart "
+			} else {
+				title = "simple "
+			}
 			if tc.title != "" {
-				title = tc.title + " "
+				title += tc.title + " "
 			}
 			title += fmt.Sprintf("%v", tc.filenames)
-			if useMultipart {
-				title += " simple POST"
-			}
 
 			client := th.Client
 			if tc.client != nil {
@@ -316,21 +282,50 @@ func TestUploadFiles(t *testing.T) {
 			}
 
 			t.Run(title, func(t *testing.T) {
-				fileUploadResponse := testUploadFiles(t, client, channelId, tc.filenames,
-					useMultipart, tc.checkResponse)
-
-				dbInfos := []*model.FileInfo{}
-				if tc.checkFileUploadResponse != nil {
-					dbInfos = tc.checkFileUploadResponse(t, th, fileUploadResponse, tc.expected)
+				resp := testUploadLocalFiles(t, client, channelId, tc.filenames, useMultipart, tc.checkResponse, true)
+				if !tc.expectSuccess {
+					return
+				}
+				if resp == nil || len(resp.FileInfos) == 0 || len(resp.FileInfos) != len(tc.filenames) {
+					t.Fatal("Empty or mismatched actual or expected FileInfos")
 				}
 
-				if fileUploadResponse != nil {
-					for _, fi := range dbInfos {
-						err := th.cleanupTestFile(fi)
-						if err != nil {
-							t.Fatal(err)
-						}
+				for _, ri := range resp.FileInfos {
+					// The returned file info from the upload call will be missing some fields that will be stored in the database
+					checkEq(t, ri.CreatorId, tc.expectedCreatorId, "File should be assigned to user")
+					checkEq(t, ri.PostId, "", "File shouldn't have a post Id")
+					checkEq(t, ri.Path, "", "File path should not be set on returned info")
+					checkEq(t, ri.ThumbnailPath, "", "File thumbnail path should not be set on returned info")
+					checkEq(t, ri.PreviewPath, "", "File preview path should not be set on returned info")
+
+					var dbInfo *model.FileInfo
+					result := <-th.App.Srv.Store.FileInfo().Get(ri.Id)
+					if result.Err != nil {
+						t.Error(result.Err)
+					} else {
+						dbInfo = result.Data.(*model.FileInfo)
 					}
+					checkEq(t, dbInfo.Id, ri.Id, "File id from response should match one stored in database")
+					checkEq(t, dbInfo.CreatorId, tc.expectedCreatorId, "F ile should be assigned to user")
+					checkEq(t, dbInfo.PostId, "", "File shouldn't have a post")
+					checkNeq(t, dbInfo.Path, "", "File path should be set in database")
+					_, fname := filepath.Split(dbInfo.Path)
+					ext := filepath.Ext(fname)
+					name := fname[:len(fname)-len(ext)]
+					expectedDir := fmt.Sprintf(tc.expectedPathPrefix+"%s/%s", ri.CreatorId, ri.Id)
+					expectedPath := fmt.Sprintf("%s/%s", expectedDir, fname)
+					checkEq(t, dbInfo.Path, expectedPath,
+						fmt.Sprintf("File %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.Path, expectedPath))
+					if tc.expectImage {
+						expectedThumbnailPath := fmt.Sprintf("%s/%s_thumb.jpg", expectedDir, name)
+						expectedPreviewPath := fmt.Sprintf("%s/%s_preview.jpg", expectedDir, name)
+						checkEq(t, dbInfo.ThumbnailPath, expectedThumbnailPath,
+							fmt.Sprintf("File %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.ThumbnailPath, expectedThumbnailPath))
+						checkEq(t, dbInfo.PreviewPath, expectedPreviewPath,
+							fmt.Sprintf("File %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.PreviewPath, expectedPreviewPath))
+					}
+
+					th.cleanupTestFile(dbInfo)
 				}
 			})
 
