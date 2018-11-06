@@ -617,7 +617,7 @@ func CheckNoError(t *testing.T, resp *model.Response) {
 	t.Helper()
 
 	if resp.Error != nil {
-		t.Fatal("Expected no error, got " + resp.Error.Error())
+		t.Fatalf("Expected no error, got %q", resp.Error.Error())
 	}
 }
 
@@ -702,6 +702,21 @@ func CheckNotImplementedStatus(t *testing.T, resp *model.Response) {
 	if resp.StatusCode != http.StatusNotImplemented {
 		t.Log("actual: " + strconv.Itoa(resp.StatusCode))
 		t.Log("expected: " + strconv.Itoa(http.StatusNotImplemented))
+		t.Fatal("wrong status code")
+	}
+}
+
+func CheckRequestEntityTooLargeStatus(t *testing.T, resp *model.Response) {
+	t.Helper()
+
+	if resp.Error == nil {
+		t.Fatal("should have errored with status:" + strconv.Itoa(http.StatusRequestEntityTooLarge))
+		return
+	}
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Log("actual: " + strconv.Itoa(resp.StatusCode))
+		t.Log("expected: " + strconv.Itoa(http.StatusRequestEntityTooLarge))
 		t.Fatal("wrong status code")
 	}
 }

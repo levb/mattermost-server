@@ -519,7 +519,9 @@ func (ufc *UploadFileContext) init(a *App) *model.AppError {
 	if ufc.ContentLength > *a.Config().FileSettings.MaxFileSize {
 		return model.NewAppError("UploadFile",
 			"api.file.upload_file.too_large.app_error",
-			nil, "", http.StatusRequestEntityTooLarge)
+			nil,
+			fmt.Sprintf("Content-Length: %v, MaxFileSize:%v", ufc.ContentLength, *a.Config().FileSettings.MaxFileSize),
+			http.StatusRequestEntityTooLarge)
 	}
 
 	ufc.Name = filepath.Base(ufc.Name)
@@ -565,7 +567,9 @@ func (ufc *UploadFileContext) readAll() *model.AppError {
 	if int64(ufc.buf.Len()) > ufc.limit {
 		return model.NewAppError("uploadFile",
 			"api.file.upload_file.too_large.app_error",
-			nil, "", http.StatusRequestEntityTooLarge)
+			nil,
+			fmt.Sprintf("read: %v, limit:%v", ufc.buf.Len(), ufc.limit),
+			http.StatusRequestEntityTooLarge)
 	}
 	ufc.info.Size = int64(ufc.buf.Len())
 

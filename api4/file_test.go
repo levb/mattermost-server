@@ -175,6 +175,10 @@ func TestUploadFiles(t *testing.T) {
 	channel := th.BasicChannel
 	date := time.Now().Format("20060102")
 
+	// Set MaxFileSize to the size of the biggest file in the test.
+	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = 279591 })
+	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableDeveloper = true })
+
 	tests := []struct {
 		title              string
 		filenames          []string
@@ -249,6 +253,18 @@ func TestUploadFiles(t *testing.T) {
 				a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.EnableFileAttachments = false })
 				return func(a *app.App) {
 					a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.EnableFileAttachments = enableFileAttachments })
+				}
+			},
+		},
+		{
+			title:         "File too large",
+			filenames:     []string{"test.png"},
+			checkResponse: CheckRequestEntityTooLargeStatus,
+			setupConfig: func(a *app.App) func(a *app.App) {
+				maxFileSize := *a.Config().FileSettings.MaxFileSize
+				a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = 279590 })
+				return func(a *app.App) {
+					a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = maxFileSize })
 				}
 			},
 		},
