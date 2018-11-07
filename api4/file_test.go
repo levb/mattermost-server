@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/gif"
 	"image/jpeg"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
@@ -108,7 +109,7 @@ func BenchmarkUploadImage(b *testing.B) {
 func testUploadLocalFile(t *testing.T, client *model.Client4, channelId string, name string,
 	useMultipart, useChunkedInSimplePost bool,
 	check func(t *testing.T, resp *model.Response), validatePayload bool) *model.FileInfo {
-
+	t.Helper()
 	fileResp := testUploadLocalFiles(t, client, channelId, []string{name}, useMultipart,
 		useChunkedInSimplePost, check, validatePayload)
 	if fileResp == nil || len(fileResp.FileInfos) == 0 {
@@ -119,6 +120,7 @@ func testUploadLocalFile(t *testing.T, client *model.Client4, channelId string, 
 
 func testUploadLocalFiles(t *testing.T, client *model.Client4, channelId string, names []string, useMultipart, useChunkedInSimplePost bool,
 	checkResponse func(t *testing.T, resp *model.Response), validatePayloads bool) *model.FileUploadResponse {
+	t.Helper()
 
 	dir, _ := utils.FindDir("tests")
 	paths := []string{}
@@ -174,11 +176,17 @@ func checkNeq(tb testing.TB, v1, v2 interface{}, text string) {
 func TestUploadFiles(t *testing.T) {
 	th := Setup().InitBasic().InitSystemAdmin()
 	defer th.TearDown()
+	if *th.App.Config().FileSettings.DriverName == "" {
+		t.Skip("skipping because no file driver is enabled")
+	}
+
 	channel := th.BasicChannel
 	date := time.Now().Format("20060102")
 
 	// Set MaxFileSize to the size of the biggest file in the test.
-	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = 279591 })
+	//th.App.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = 279591 })
+
+	// Better error messages
 	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableDeveloper = true })
 
 	tests := []struct {
@@ -378,6 +386,52 @@ func TestUploadFiles(t *testing.T) {
 			}
 		}
 	}
+
+	testDir, _ := utils.FindDir("tests")
+	t.Run("thumb preview orientation and size", func(t *testing.T) {
+		for i := 1; i <= 8; i++ {
+			client := th.Client
+			channelId := channel.Id
+
+			fi := testUploadLocalFile(t, client, channelId,
+				fmt.Sprintf("orientation_test_%v.jpeg", i), false, false, CheckNoError, false)
+			if fi == nil {
+				t.Fatal("Expected a FileInfo, got nil")
+			}
+
+			id := fi.Id
+			compare := func(get func(string) ([]byte, *model.Response), suffix string) {
+				data, resp := get(id)
+				if resp.Error != nil {
+					t.Fatal(resp.Error)
+				}
+
+				expectedName := fmt.Sprintf("%s/orientation_test_%v_expected_%s.jpeg", testDir, i, suffix)
+				f, err := os.Open(expectedName)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer f.Close()
+				expectedData, err := ioutil.ReadAll(f)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if bytes.Compare(data, expectedData) != 0 {
+					tf, err := ioutil.TempFile("", fmt.Sprintf("orientation_test_%v_%s_*.jpeg", i, suffix))
+					if err != nil {
+						t.Fatal(err)
+					}
+					io.Copy(tf, bytes.NewReader(data))
+					t.Errorf("%q did not match, actual data written to %q", expectedName, tf.Name())
+					tf.Close()
+				}
+			}
+
+			compare(client.GetFileThumbnail, "thumb")
+			compare(client.GetFilePreview, "preview")
+		}
+	})
 }
 
 func TestGetFile(t *testing.T) {
