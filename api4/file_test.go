@@ -106,16 +106,18 @@ func BenchmarkUploadImage(b *testing.B) {
 }
 
 func testUploadLocalFile(t *testing.T, client *model.Client4, channelId string, name string,
-	useMultipart bool, check func(t *testing.T, resp *model.Response), validatePayload bool) *model.FileInfo {
+	useMultipart, useChunkedInSimplePost bool,
+	check func(t *testing.T, resp *model.Response), validatePayload bool) *model.FileInfo {
 
-	fileResp := testUploadLocalFiles(t, client, channelId, []string{name}, useMultipart, check, validatePayload)
+	fileResp := testUploadLocalFiles(t, client, channelId, []string{name}, useMultipart,
+		useChunkedInSimplePost, check, validatePayload)
 	if fileResp == nil || len(fileResp.FileInfos) == 0 {
 		return nil
 	}
 	return fileResp.FileInfos[0]
 }
 
-func testUploadLocalFiles(t *testing.T, client *model.Client4, channelId string, names []string, useMultipart bool,
+func testUploadLocalFiles(t *testing.T, client *model.Client4, channelId string, names []string, useMultipart, useChunkedInSimplePost bool,
 	checkResponse func(t *testing.T, resp *model.Response), validatePayloads bool) *model.FileUploadResponse {
 
 	dir, _ := utils.FindDir("tests")
@@ -125,7 +127,7 @@ func testUploadLocalFiles(t *testing.T, client *model.Client4, channelId string,
 		paths = append(paths, filepath.Join(dir, name))
 	}
 
-	fileResp, resp := client.UploadLocalFiles(channelId, paths, nil, nil, useMultipart)
+	fileResp, resp := client.UploadLocalFiles(channelId, paths, nil, nil, useMultipart, useChunkedInSimplePost)
 
 	if checkResponse != nil {
 		checkResponse(t, resp)
@@ -180,16 +182,17 @@ func TestUploadFiles(t *testing.T) {
 	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableDeveloper = true })
 
 	tests := []struct {
-		title              string
-		filenames          []string
-		client             *model.Client4
-		channelId          string
-		setupConfig        func(a *app.App) func(a *app.App)
-		checkResponse      func(t *testing.T, resp *model.Response)
-		expectSuccess      bool
-		expectImage        bool
-		expectedCreatorId  string
-		expectedPathPrefix string
+		title                  string
+		filenames              []string
+		client                 *model.Client4
+		channelId              string
+		useChunkedInSimplePost bool
+		setupConfig            func(a *app.App) func(a *app.App)
+		checkResponse          func(t *testing.T, resp *model.Response)
+		expectSuccess          bool
+		expectImage            bool
+		expectedCreatorId      string
+		expectedPathPrefix     string
 	}{
 		{
 			title:              "basic",
@@ -207,6 +210,16 @@ func TestUploadFiles(t *testing.T) {
 			expectSuccess:      true,
 			expectedCreatorId:  th.BasicUser.Id,
 			expectedPathPrefix: fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
+		},
+		{
+			title:                  "basic chunked simple post",
+			useChunkedInSimplePost: true,
+			filenames:              []string{"test.png"},
+			checkResponse:          CheckNoError,
+			expectImage:            true,
+			expectSuccess:          true,
+			expectedCreatorId:      th.BasicUser.Id,
+			expectedPathPrefix:     fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
 		},
 		{
 			title:         "basic channelId does not exist",
@@ -268,6 +281,19 @@ func TestUploadFiles(t *testing.T) {
 				}
 			},
 		},
+		{
+			title:                  "File too large chunked",
+			useChunkedInSimplePost: true,
+			filenames:              []string{"test.png"},
+			checkResponse:          CheckRequestEntityTooLargeStatus,
+			setupConfig: func(a *app.App) func(a *app.App) {
+				maxFileSize := *a.Config().FileSettings.MaxFileSize
+				a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = 279590 })
+				return func(a *app.App) {
+					a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = maxFileSize })
+				}
+			},
+		},
 	}
 
 	for _, useMultipart := range []bool{true, false} {
@@ -298,7 +324,9 @@ func TestUploadFiles(t *testing.T) {
 			}
 
 			t.Run(title, func(t *testing.T) {
-				resp := testUploadLocalFiles(t, client, channelId, tc.filenames, useMultipart, tc.checkResponse, true)
+				resp := testUploadLocalFiles(t, client, channelId, tc.filenames,
+					useMultipart, tc.useChunkedInSimplePost, tc.checkResponse,
+					true)
 				if !tc.expectSuccess {
 					return
 				}

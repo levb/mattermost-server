@@ -2263,13 +2263,15 @@ func escapeQuotes(s string) string {
 }
 
 func (c *Client4) UploadLocalFiles(channelId string, filepaths []string, names []string,
-	clientIds []string, useMultipart bool) (*FileUploadResponse, *Response) {
-	return c.uploadFiles(channelId, filepaths, names, nil, nil, clientIds, useMultipart, true)
+	clientIds []string, useMultipart, useChunkedInSimplePost bool) (*FileUploadResponse, *Response) {
+	return c.uploadFiles(channelId, filepaths, names, nil, nil, clientIds, useMultipart,
+		useChunkedInSimplePost, true)
 }
 
 func (c *Client4) UploadFiles(channelId string, names []string, files []io.Reader,
-	contentLengths []int64, clientIds []string, useMultipart bool) (*FileUploadResponse, *Response) {
-	return c.uploadFiles(channelId, nil, names, files, contentLengths, clientIds, useMultipart, false)
+	contentLengths []int64, clientIds []string, useMultipart, useChunkedInSimplePost bool) (*FileUploadResponse, *Response) {
+	return c.uploadFiles(channelId, nil, names, files, contentLengths, clientIds, useMultipart,
+		useChunkedInSimplePost, false)
 }
 
 func (c *Client4) uploadFiles(
@@ -2279,8 +2281,7 @@ func (c *Client4) uploadFiles(
 	files []io.Reader,
 	contentLengths []int64,
 	clientIds []string,
-	useMultipart bool,
-	useLocalFiles bool) (*FileUploadResponse, *Response) {
+	useMultipart, useChunkedInSimplePost, useLocalFiles bool) (*FileUploadResponse, *Response) {
 
 	// Do not check len(clientIds), leave it entirely to the user to
 	// provide. The server will error out if it does not match the number
@@ -2397,6 +2398,9 @@ func (c *Client4) uploadFiles(
 				fmt.Sprintf("&filename=%v", url.QueryEscape(name))
 			if len(clientIds) > i {
 				postURL += fmt.Sprintf("&client_id=%v", url.QueryEscape(clientIds[i]))
+			}
+			if useChunkedInSimplePost {
+				cl = -1
 			}
 			fur, resp := c.doUploadFile(postURL, reader, ct, cl)
 			if resp.Error != nil {
