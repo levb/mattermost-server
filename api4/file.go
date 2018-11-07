@@ -206,7 +206,7 @@ func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, appErr := c.App.UploadFile(&app.UploadFileContext{
+	info, appErr := c.App.UploadFile2(&app.UploadFileContext{
 		Timestamp:     timestamp,
 		TeamId:        FILE_TEAM_ID,
 		ChannelId:     c.Params.ChannelId,
@@ -379,7 +379,7 @@ func uploadFileMultipart(c *Context, r *http.Request, timestamp time.Time,
 			clientId = clientIds[nFiles]
 		}
 
-		info, appErr := c.App.UploadFile(&app.UploadFileContext{
+		info, appErr := c.App.UploadFile2(&app.UploadFileContext{
 			Timestamp:     timestamp,
 			TeamId:        FILE_TEAM_ID,
 			ChannelId:     c.Params.ChannelId,
@@ -474,7 +474,7 @@ func uploadFileMultipartBuffered(c *Context, mr *multipart.Reader,
 			clientId = clientIds[i]
 		}
 
-		info, appErr := c.App.UploadFile(&app.UploadFileContext{
+		info, appErr := c.App.UploadFile2(&app.UploadFileContext{
 			Timestamp:     timestamp,
 			TeamId:        FILE_TEAM_ID,
 			ChannelId:     c.Params.ChannelId,

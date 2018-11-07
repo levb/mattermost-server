@@ -353,7 +353,7 @@ func (a *App) UploadMultipartFiles(teamId string, channelId string, userId strin
 // The provided files should be closed by the caller so that they are not leaked.
 func (a *App) UploadFiles(teamId string, channelId string, userId string, files []io.ReadCloser, filenames []string, clientIds []string, now time.Time) (*model.FileUploadResponse, *model.AppError) {
 	if len(*a.Config().FileSettings.DriverName) == 0 {
-		return nil, model.NewAppError("uploadFile", "api.file.upload_file.storage.app_error", nil, "", http.StatusNotImplemented)
+		return nil, model.NewAppError("UploadFiles", "api.file.upload_file.storage.app_error", nil, "", http.StatusNotImplemented)
 	}
 
 	if len(filenames) != len(files) || (len(clientIds) > 0 && len(clientIds) != len(files)) {
@@ -422,7 +422,7 @@ func (a *App) DoUploadFile(now time.Time, rawTeamId string, rawChannelId string,
 }
 
 // UploadFileContext is the state of single file upload. A new instance of this
-// struct with its public fields pre-initialized is used to call app.UploadFile.
+// struct with its public fields pre-initialized is used to call app.UploadFile2.
 type UploadFileContext struct {
 	TeamId    string
 	ChannelId string
@@ -458,12 +458,12 @@ type UploadFileContext struct {
 	imgType     string
 }
 
-// UploadFile uploads a single file. It applies the upload constraints,
+// UploadFile2 uploads a single file. It applies the upload constraints,
 // executes the plugin and the image processing logic as needed. It returns a
 // filled-out FileInfo and an optional error. A plugin may reject the upload,
 // returning a rejection error. In this case FileInfo would have contained the
 // last "good" FileInfo before the execution of that plugin.
-func (a *App) UploadFile(ufc *UploadFileContext) (*model.FileInfo, *model.AppError) {
+func (a *App) UploadFile2(ufc *UploadFileContext) (*model.FileInfo, *model.AppError) {
 	aerr := ufc.init(a)
 	if aerr != nil {
 		return nil, aerr
@@ -512,12 +512,12 @@ func (ufc *UploadFileContext) init(a *App) *model.AppError {
 	ufc.buf = &bytes.Buffer{}
 
 	if len(*a.Config().FileSettings.DriverName) == 0 {
-		return model.NewAppError("UploadFile",
+		return model.NewAppError("UploadFile2",
 			"api.file.upload_file.storage.app_error",
 			nil, "", http.StatusNotImplemented)
 	}
 	if ufc.ContentLength > *a.Config().FileSettings.MaxFileSize {
-		return model.NewAppError("UploadFile",
+		return model.NewAppError("UploadFile2",
 			"api.file.upload_file.too_large.app_error",
 			nil,
 			fmt.Sprintf("Content-Length: %v, MaxFileSize:%v", ufc.ContentLength, *a.Config().FileSettings.MaxFileSize),
@@ -560,12 +560,12 @@ func (ufc *UploadFileContext) init(a *App) *model.AppError {
 func (ufc *UploadFileContext) readAll() *model.AppError {
 	_, err := io.Copy(ufc.buf, ufc.limitedInput)
 	if err != nil {
-		return model.NewAppError("UploadFile",
+		return model.NewAppError("UploadFile2",
 			"api.file.upload_file.read_request.app_error",
 			nil, err.Error(), http.StatusInternalServerError)
 	}
 	if int64(ufc.buf.Len()) > ufc.limit {
-		return model.NewAppError("uploadFile",
+		return model.NewAppError("uploadFile2",
 			"api.file.upload_file.too_large.app_error",
 			nil,
 			fmt.Sprintf("read: %v, limit:%v", ufc.buf.Len(), ufc.limit),
@@ -603,7 +603,7 @@ func (ufc *UploadFileContext) preprocessImage() *model.AppError {
 
 	// Check dimensions before loading the whole thing into memory later on.
 	if ufc.info.Width*ufc.info.Height > MaxImageSize {
-		return model.NewAppError("uploadFile",
+		return model.NewAppError("uploadFile2",
 			"api.file.upload_file.large_image.app_error",
 			map[string]interface{}{"Filename": ufc.Name}, "",
 			http.StatusBadRequest)
@@ -651,12 +651,12 @@ func (ufc *UploadFileContext) runUploadFilePlugins() *model.AppError {
 	pluginContext := &plugin.Context{}
 	var rejectionError *model.AppError
 
-	ufc.a.Plugins.RunMultiPluginHook(func(hooks plugin.Hooks) bool {
+	ufc.a.Srv.Plugins.RunMultiPluginHook(func(hooks plugin.Hooks) bool {
 		buf := &bytes.Buffer{}
 		replacementInfo, rejectionReason := hooks.FileWillBeUploaded(pluginContext,
 			ufc.info, ufc.newReader(), buf)
 		if rejectionReason != "" {
-			rejectionError = model.NewAppError("UploadFile",
+			rejectionError = model.NewAppError("UploadFile2",
 				"File rejected by plugin. "+rejectionReason, nil, "", http.StatusBadRequest)
 			return false
 		}
