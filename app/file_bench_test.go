@@ -89,7 +89,7 @@ func BenchmarkUploadFile(b *testing.B) {
 		{
 			title: "UploadFile",
 			f: func(b *testing.B, n int, data []byte, ext string) {
-				info, err := th.App.UploadFile(&UploadFileContext{
+				info, err := th.App.UploadFile2(&UploadFileContext{
 					Timestamp:     time.Now(),
 					TeamId:        teamId,
 					ChannelId:     channelId,

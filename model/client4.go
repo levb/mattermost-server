@@ -13,7 +13,6 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -2262,32 +2261,55 @@ func escapeQuotes(s string) string {
 	return quoteEscaper.Replace(s)
 }
 
-func (c *Client4) UploadLocalFiles(channelId string, filepaths []string, names []string,
-	clientIds []string, useMultipart, useChunkedInSimplePost bool) (*FileUploadResponse, *Response) {
-	return c.uploadFiles(channelId, filepaths, names, nil, nil, clientIds, useMultipart,
-		useChunkedInSimplePost, true)
+type UploadOpener func() (io.ReadCloser, int64, error)
+
+func NewUploadOpenerRequest(r *http.Request) UploadOpener {
+	return func() (io.ReadCloser, int64, error) {
+		return r.Body, r.ContentLength, nil
+	}
 }
 
-func (c *Client4) UploadFiles(channelId string, names []string, files []io.Reader,
-	contentLengths []int64, clientIds []string, useMultipart, useChunkedInSimplePost bool) (*FileUploadResponse, *Response) {
-	return c.uploadFiles(channelId, nil, names, files, contentLengths, clientIds, useMultipart,
-		useChunkedInSimplePost, false)
+func NewUploadOpenerReader(in io.Reader) UploadOpener {
+	return func() (io.ReadCloser, int64, error) {
+		rc, ok := in.(io.ReadCloser)
+		if ok {
+			return rc, -1, nil
+		} else {
+			return ioutil.NopCloser(in), -1, nil
+		}
+	}
 }
 
-func (c *Client4) uploadFiles(
+func NewUploadOpenerFile(path string) UploadOpener {
+	return func() (io.ReadCloser, int64, error) {
+		fi, err := os.Stat(path)
+		if err != nil {
+			return nil, 0, err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, 0, err
+		}
+		return f, fi.Size(), nil
+	}
+}
+
+func (c *Client4) UploadFiles(
 	channelId string,
-	filepaths []string,
 	names []string,
-	files []io.Reader,
+	openers []UploadOpener,
 	contentLengths []int64,
 	clientIds []string,
-	useMultipart, useChunkedInSimplePost, useLocalFiles bool) (*FileUploadResponse, *Response) {
-
+	useMultipart,
+	useChunkedInSimplePost bool,
+) (
+	fileUploadResponse *FileUploadResponse,
+	response *Response,
+) {
 	// Do not check len(clientIds), leave it entirely to the user to
 	// provide. The server will error out if it does not match the number
 	// of files, but it's not critical here.
-	if useLocalFiles && len(filepaths) == 0 ||
-		!useLocalFiles && (len(names) == 0 || len(files) == 0 || len(names) != len(files)) {
+	if len(names) == 0 || len(openers) == 0 || len(names) != len(openers) {
 		return nil, &Response{
 			Error: NewAppError("UploadFiles",
 				"model.client.upload_post_attachment.file.app_error",
@@ -2309,63 +2331,90 @@ func (c *Client4) uploadFiles(
 	// time.
 	pipeReader, pipeWriter := io.Pipe()
 	mw := multipart.NewWriter(pipeWriter)
-
-	fileUploadResponse := &FileUploadResponse{}
-	response := (*Response)(nil)
-	fileUploadResponseChannel := make(chan *FileUploadResponse)
-	responseChannel := make(chan *Response)
+	doneMultipart := false
 
 	if useMultipart {
+		fileUploadResponseChannel := make(chan *FileUploadResponse)
+		responseChannel := make(chan *Response)
+		closedMultipart := false
+
 		go func() {
-			fur, resp := c.doUploadFile(c.GetFilesRoute(), pipeReader, mw.FormDataContentType(), 0)
-			fileUploadResponseChannel <- fur
+			fur, resp := c.doUploadFile(c.GetFilesRoute(), pipeReader, mw.FormDataContentType(), -1)
 			responseChannel <- resp
+			fileUploadResponseChannel <- fur
+		}()
+
+		defer func() {
+			for {
+				select {
+				// Premature response, before the entire
+				// multipart was sent
+				case response = <-responseChannel:
+					// Guaranteed to be there
+					fileUploadResponse = <-fileUploadResponseChannel
+					if !closedMultipart {
+						_ = mw.Close()
+						_ = pipeWriter.Close()
+						closedMultipart = true
+					}
+					return
+
+				// Normal response, after the multipart was sent.
+				default:
+					if !doneMultipart {
+						// TODO: unreachable code? by this time doUploadFile will have finished, and the result uploaded to the channel
+						//response = <-responseChannel
+						//fileUploadResponse = <-fileUploadResponseChannel
+						//if !closedMultipart {
+						//	_ = mw.Close()
+						//	_ = pipeWriter.Close()
+						//	closedMultipart = true
+						//}
+						//return
+					}
+
+					if !closedMultipart {
+						err := mw.Close()
+						if err != nil {
+							fileUploadResponse = nil
+							response = emergencyResponse(err, "upload_post_attachment.writer")
+							return
+						}
+						err = pipeWriter.Close()
+						if err != nil {
+							fileUploadResponse = nil
+							response = emergencyResponse(err, "upload_post_attachment.writer")
+							return
+						}
+						closedMultipart = true
+					}
+				}
+			}
 		}()
 
 		err := mw.WriteField("channel_id", channelId)
 		if err != nil {
 			return nil, emergencyResponse(err, "upload_post_attachment.channel_id")
 		}
+	} else {
+		fileUploadResponse = &FileUploadResponse{}
 	}
 
-	i := 0
-	nFiles := len(files)
-	if useLocalFiles {
-		nFiles = len(filepaths)
-	}
-	f := io.ReadCloser(nil)
-	cl := int64(0)
-	name := ""
+	var f io.ReadCloser
+	var cl int64
+	var err error
 	data := make([]byte, 512)
-	for i = 0; i < nFiles; i++ {
-		if useLocalFiles {
-			fi, err := os.Stat(filepaths[i])
-			if err != nil {
-				return nil, emergencyResponse(err, "upload_post_attachment")
-			}
-			cl = fi.Size()
 
-			if len(names) > i && names[i] != "" {
-				name = names[i]
-			} else {
-				_, name = filepath.Split(filepaths[i])
-			}
+	upload := func(i int, f io.ReadCloser) *Response {
+		defer f.Close()
 
-			f, err = os.Open(filepaths[i])
-			if err != nil {
-				return nil, emergencyResponse(err, "upload_post_attachment")
-			}
-		} else {
-			if len(contentLengths) > i {
-				cl = contentLengths[i]
-			}
-			name = names[i]
-			f = ioutil.NopCloser(files[i])
+		if len(contentLengths) > i {
+			cl = contentLengths[i]
 		}
 
 		n, err := f.Read(data)
 		if err != nil && err != io.EOF {
-			return nil, emergencyResponse(err, "upload_post_attachment")
+			return emergencyResponse(err, "upload_post_attachment")
 		}
 		ct := http.DetectContentType(data[:n])
 		reader := io.MultiReader(bytes.NewReader(data[:n]), f)
@@ -2374,28 +2423,29 @@ func (c *Client4) uploadFiles(
 			if len(clientIds) > i {
 				err := mw.WriteField("client_id", clientIds[i])
 				if err != nil {
-					return nil, emergencyResponse(err, "upload_post_attachment.file")
+					return emergencyResponse(err, "upload_post_attachment.file")
 				}
 			}
 
 			h := make(textproto.MIMEHeader)
 			h.Set("Content-Disposition",
-				fmt.Sprintf(`form-data; name="files"; filename="%s"`, escapeQuotes(name)))
+				fmt.Sprintf(`form-data; name="files"; filename="%s"`, escapeQuotes(names[i])))
 			h.Set("Content-Type", ct)
 
+			// If we error here, writing to mw, the deferred handler
 			part, err := mw.CreatePart(h)
 			if err != nil {
-				return nil, emergencyResponse(err, "upload_post_attachment.writer")
+				return emergencyResponse(err, "upload_post_attachment.writer")
 			}
 
 			_, err = io.Copy(part, reader)
 			if err != nil {
-				return nil, emergencyResponse(err, "upload_post_attachment.writer")
+				return emergencyResponse(err, "upload_post_attachment.writer")
 			}
 		} else {
 			postURL := c.GetFilesRoute() +
 				fmt.Sprintf("?channel_id=%v", url.QueryEscape(channelId)) +
-				fmt.Sprintf("&filename=%v", url.QueryEscape(name))
+				fmt.Sprintf("&filename=%v", url.QueryEscape(names[i]))
 			if len(clientIds) > i {
 				postURL += fmt.Sprintf("&client_id=%v", url.QueryEscape(clientIds[i]))
 			}
@@ -2404,7 +2454,7 @@ func (c *Client4) uploadFiles(
 			}
 			fur, resp := c.doUploadFile(postURL, reader, ct, cl)
 			if resp.Error != nil {
-				return nil, resp
+				return resp
 			}
 			fileUploadResponse.FileInfos = append(fileUploadResponse.FileInfos, fur.FileInfos[0])
 			if len(clientIds) > 0 {
@@ -2417,22 +2467,25 @@ func (c *Client4) uploadFiles(
 			response = resp
 		}
 
-		f.Close()
+		return nil
 	}
 
-	if useMultipart {
-		err := mw.Close()
+	for i, open := range openers {
+		f, cl, err = open()
 		if err != nil {
-			return nil, emergencyResponse(err, "upload_post_attachment.writer")
+			return nil, emergencyResponse(err, "upload_post_attachment")
 		}
-		err = pipeWriter.Close()
-		if err != nil {
-			return nil, emergencyResponse(err, "upload_post_attachment.writer")
+
+		resp := upload(i, f)
+		if resp != nil && resp.Error != nil {
+			return nil, resp
 		}
-		fileUploadResponse = <-fileUploadResponseChannel
-		response = <-responseChannel
 	}
 
+	// In case of a simple POST, the return values have been set by upload(),
+	// otherwise we finished writing the multipart, and the return values will
+	// be set in defer
+	doneMultipart = true
 	return fileUploadResponse, response
 }
 

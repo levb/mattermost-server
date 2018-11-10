@@ -80,7 +80,7 @@ func prepareTestImages(tb testing.TB) {
 	randomGIF = buf.Bytes()
 }
 
-func TestUploadFile(t *testing.T) {
+func TestUploadFile2(t *testing.T) {
 	th := Setup()
 	defer th.TearDown()
 
@@ -93,7 +93,7 @@ func TestUploadFile(t *testing.T) {
 	uploadAndVerifyPath := func(t *testing.T, timestamp time.Time, filename string,
 		data []byte, expectedPathPrefix string) {
 
-		info, err := th.App.UploadFile(&UploadFileContext{
+		info, err := th.App.UploadFile2(&UploadFileContext{
 			Timestamp:     timestamp,
 			TeamId:        teamId,
 			ChannelId:     channelId,
@@ -173,7 +173,7 @@ func TestUploadFile(t *testing.T) {
 			f: func(t *testing.T,
 				timestamp time.Time, filename string, data []byte, expectedPathPrefix string) {
 
-				info, err := th.App.UploadFile(&UploadFileContext{
+				info, err := th.App.UploadFile2(&UploadFileContext{
 					Timestamp:     timestamp,
 					TeamId:        "../../" + teamId,
 					ChannelId:     "../../" + channelId,

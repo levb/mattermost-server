@@ -48,6 +48,9 @@ var MEDIA_CONTENT_TYPES = [...]string{
 	"audio/wav",
 }
 
+const maxUploadDrainBytes = (10 * 1024 * 1024)
+const maxMultipartValueBytes = 10 * 1024
+
 func (api *API) InitFile() {
 	api.BaseRoutes.Files.Handle("", api.ApiSessionRequired(uploadFileStream)).Methods("POST")
 	api.BaseRoutes.File.Handle("", api.ApiSessionRequiredTrustRequester(getFile)).Methods("GET")
@@ -147,18 +150,19 @@ func uploadFile(c *Context, w http.ResponseWriter, r *http.Request) {
 }
 
 func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
-	// TODO wrap r.Body into a LimitReader to ensure the total limit,
+	// Drain any remaining bytes in the request body, up to a limit
+	// TODO: make maxUploadDrainBytes configurable? Also, should this be the systemic behavior of all APIs with non-empty body? Otherwise dropped altogether?
+	defer io.CopyN(ioutil.Discard, r.Body, maxUploadDrainBytes)
 
-	// TODO Why was this here: defer io.Copy(ioutil.Discard, r.Body)
-
-	var resp *model.FileUploadResponse
+	// Write the response values to the output upon return
+	var fileUploadResponse *model.FileUploadResponse
 	defer func() {
 		if c.Err != nil {
 			return
 		}
 
 		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(resp.ToJson()))
+		w.Write([]byte(fileUploadResponse.ToJson()))
 	}()
 
 	if !*c.App.Config().FileSettings.EnableFileAttachments {
@@ -185,7 +189,7 @@ func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
 
 	_, err := r.MultipartReader()
 	if err == nil {
-		resp = uploadFileMultipart(c, r, timestamp, bufferedMode)
+		fileUploadResponse = uploadFileMultipart(c, r, timestamp, bufferedMode)
 		return
 	} else if err != http.ErrNotMultipart {
 		c.Err = model.NewAppError("uploadFileStream",
@@ -220,12 +224,10 @@ func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp = &model.FileUploadResponse{
+	fileUploadResponse = &model.FileUploadResponse{
 		FileInfos: []*model.FileInfo{info},
 	}
 }
-
-const maxValueBytes = 10 * 1024
 
 type uploadFileMultipartMode bool
 
@@ -291,7 +293,7 @@ func uploadFileMultipart(c *Context, r *http.Request, timestamp time.Time,
 		filename := p.FileName()
 		if filename == "" {
 			var b bytes.Buffer
-			_, err := io.CopyN(&b, p, maxValueBytes)
+			_, err := io.CopyN(&b, p, maxMultipartValueBytes)
 			if err != nil && err != io.EOF {
 				c.Err = model.NewAppError("uploadFileMultipart",
 					"api.file.upload_file.read_request.app_error",

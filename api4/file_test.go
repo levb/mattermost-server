@@ -13,7 +13,6 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,6 +24,12 @@ import (
 	"github.com/mattermost/mattermost-server/store"
 	"github.com/mattermost/mattermost-server/utils"
 )
+
+var testDir = ""
+
+func init() {
+	testDir, _ = utils.FindDir("tests")
+}
 
 func BenchmarkUploadImage(b *testing.B) {
 	b.StopTimer()
@@ -106,59 +111,6 @@ func BenchmarkUploadImage(b *testing.B) {
 		})
 }
 
-func testUploadLocalFile(t *testing.T, client *model.Client4, channelId string, name string,
-	useMultipart, useChunkedInSimplePost bool,
-	check func(t *testing.T, resp *model.Response), validatePayload bool) *model.FileInfo {
-	t.Helper()
-	fileResp := testUploadLocalFiles(t, client, channelId, []string{name}, useMultipart,
-		useChunkedInSimplePost, check, validatePayload)
-	if fileResp == nil || len(fileResp.FileInfos) == 0 {
-		return nil
-	}
-	return fileResp.FileInfos[0]
-}
-
-func testUploadLocalFiles(t *testing.T, client *model.Client4, channelId string, names []string, useMultipart, useChunkedInSimplePost bool,
-	checkResponse func(t *testing.T, resp *model.Response), validatePayloads bool) *model.FileUploadResponse {
-	t.Helper()
-
-	dir, _ := utils.FindDir("tests")
-	paths := []string{}
-
-	for _, name := range names {
-		paths = append(paths, filepath.Join(dir, name))
-	}
-
-	fileResp, resp := client.UploadLocalFiles(channelId, paths, nil, nil, useMultipart, useChunkedInSimplePost)
-
-	if checkResponse != nil {
-		checkResponse(t, resp)
-	}
-	if fileResp == nil {
-		return nil
-	}
-	if len(fileResp.FileInfos) != len(names) {
-		t.Errorf("Expected %v FileInfos, got %v", len(names), len(fileResp.FileInfos))
-	}
-	if !validatePayloads {
-		return fileResp
-	}
-
-	for i, fi := range fileResp.FileInfos {
-		f, _ := os.Open(paths[i])
-		expected, _ := ioutil.ReadAll(f)
-		f.Close()
-
-		data, resp := client.GetFile(fi.Id)
-		CheckNoError(t, resp)
-
-		if bytes.Compare(data, expected) != 0 {
-			t.Errorf("Mismatched payload")
-		}
-	}
-	return fileResp
-}
-
 func checkCond(tb testing.TB, cond bool, text string) {
 	if !cond {
 		tb.Error(text)
@@ -173,6 +125,22 @@ func checkNeq(tb testing.TB, v1, v2 interface{}, text string) {
 	checkCond(tb, fmt.Sprintf("%+v", v1) != fmt.Sprintf("%+v", v2), text)
 }
 
+type zeroReader struct {
+	limit, read int
+}
+
+func (z *zeroReader) Read(b []byte) (int, error) {
+	for i := range b {
+		if z.read == z.limit {
+			return i, io.EOF
+		}
+		b[i] = 0
+		z.read++
+	}
+
+	return len(b), nil
+}
+
 func TestUploadFiles(t *testing.T) {
 	th := Setup().InitBasic().InitSystemAdmin()
 	defer th.TearDown()
@@ -183,92 +151,178 @@ func TestUploadFiles(t *testing.T) {
 	channel := th.BasicChannel
 	date := time.Now().Format("20060102")
 
-	// Set MaxFileSize to the size of the biggest file in the test.
-	//th.App.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = 279591 })
-
-	// Better error messages
+	// Get better error messages
 	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableDeveloper = true })
 
+	op := func(name string) model.UploadOpener {
+		return model.NewUploadOpenerFile(filepath.Join(testDir, name))
+	}
+
 	tests := []struct {
-		title                  string
-		filenames              []string
-		client                 *model.Client4
+		title   string
+		client  *model.Client4
+		openers []model.UploadOpener
+		names   []string
+
+		skipSuccessValidation  bool
+		skipPayloadValidation  bool
+		skipMultipart          bool
+		expectedPayloadNames   []string
+		expectedThumbnailNames []string
+		expectedPreviewNames   []string
 		channelId              string
 		useChunkedInSimplePost bool
-		setupConfig            func(a *app.App) func(a *app.App)
-		checkResponse          func(t *testing.T, resp *model.Response)
-		expectSuccess          bool
 		expectImage            bool
 		expectedCreatorId      string
-		expectedPathPrefix     string
+		setupConfig            func(a *app.App) func(a *app.App)
+		checkResponse          func(t *testing.T, resp *model.Response)
 	}{
+		// Upload a bunch of files, mixed images and non-images
 		{
-			title:              "basic",
-			filenames:          []string{"test.png", "testgif.gif", "testplugin.tar.gz", "test-config.json"},
-			checkResponse:      CheckNoError,
-			expectSuccess:      true,
-			expectedCreatorId:  th.BasicUser.Id,
-			expectedPathPrefix: fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
+			title:             "happy",
+			names:             []string{"test.png", "testgif.gif", "testplugin.tar.gz", "test-config.json"},
+			checkResponse:     CheckNoError,
+			expectedCreatorId: th.BasicUser.Id,
 		},
+		// Upload a bunch of images
 		{
-			title:              "basic images",
-			filenames:          []string{"test.png", "testgif.gif"},
-			checkResponse:      CheckNoError,
-			expectImage:        true,
-			expectSuccess:      true,
-			expectedCreatorId:  th.BasicUser.Id,
-			expectedPathPrefix: fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
+			title:             "images",
+			names:             []string{"test.png", "testgif.gif"},
+			checkResponse:     CheckNoError,
+			expectImage:       true,
+			expectedCreatorId: th.BasicUser.Id,
 		},
+		// Simple POST, chunked encoding
 		{
-			title:                  "basic chunked simple post",
+			title:                  "chunked simple post",
+			skipMultipart:          true,
 			useChunkedInSimplePost: true,
-			filenames:              []string{"test.png"},
+			names:                  []string{"test.png"},
 			checkResponse:          CheckNoError,
 			expectImage:            true,
-			expectSuccess:          true,
 			expectedCreatorId:      th.BasicUser.Id,
-			expectedPathPrefix:     fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
+		},
+		// Image thumbnail and preview: size and orientation
+		{
+			title:                  "image thumbnail/preview 1",
+			names:                  []string{"orientation_test_1.jpeg"},
+			expectedThumbnailNames: []string{"orientation_test_1_expected_thumb.jpeg"},
+			expectedPreviewNames:   []string{"orientation_test_1_expected_preview.jpeg"},
+			checkResponse:          CheckNoError,
+			expectImage:            true,
+			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:         "basic channelId does not exist",
-			channelId:     model.NewId(),
-			filenames:     []string{"test.png"},
-			checkResponse: CheckForbiddenStatus,
+			title:                  "image thumbnail/preview 2",
+			names:                  []string{"orientation_test_2.jpeg"},
+			expectedThumbnailNames: []string{"orientation_test_2_expected_thumb.jpeg"},
+			expectedPreviewNames:   []string{"orientation_test_2_expected_preview.jpeg"},
+			checkResponse:          CheckNoError,
+			expectImage:            true,
+			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:         "basic invalid channelId",
-			channelId:     "../../junk",
-			filenames:     []string{"test.png"},
-			checkResponse: CheckBadRequestStatus,
+			title:                  "image thumbnail/preview 3",
+			names:                  []string{"orientation_test_3.jpeg"},
+			expectedThumbnailNames: []string{"orientation_test_3_expected_thumb.jpeg"},
+			expectedPreviewNames:   []string{"orientation_test_3_expected_preview.jpeg"},
+			checkResponse:          CheckNoError,
+			expectImage:            true,
+			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:              "admin",
-			client:             th.SystemAdminClient,
-			filenames:          []string{"test.png"},
-			checkResponse:      CheckNoError,
-			expectSuccess:      true,
-			expectedCreatorId:  th.SystemAdminUser.Id,
-			expectedPathPrefix: fmt.Sprintf("%v/teams/%v/channels/%v/users/", date, FILE_TEAM_ID, channel.Id),
+			title:                  "image thumbnail/preview 4",
+			names:                  []string{"orientation_test_4.jpeg"},
+			expectedThumbnailNames: []string{"orientation_test_4_expected_thumb.jpeg"},
+			expectedPreviewNames:   []string{"orientation_test_4_expected_preview.jpeg"},
+			checkResponse:          CheckNoError,
+			expectImage:            true,
+			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:         "admin channelId does not exist",
-			client:        th.SystemAdminClient,
-			channelId:     model.NewId(),
-			filenames:     []string{"test.png"},
-			checkResponse: CheckForbiddenStatus,
+			title:                  "image thumbnail/preview 5",
+			names:                  []string{"orientation_test_5.jpeg"},
+			expectedThumbnailNames: []string{"orientation_test_5_expected_thumb.jpeg"},
+			expectedPreviewNames:   []string{"orientation_test_5_expected_preview.jpeg"},
+			checkResponse:          CheckNoError,
+			expectImage:            true,
+			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:         "admin invalid channelId",
-			client:        th.SystemAdminClient,
-			channelId:     "../../junk",
-			filenames:     []string{"test.png"},
-			checkResponse: CheckBadRequestStatus,
+			title:                  "image thumbnail/preview 1",
+			names:                  []string{"orientation_test_6.jpeg"},
+			expectedThumbnailNames: []string{"orientation_test_6_expected_thumb.jpeg"},
+			expectedPreviewNames:   []string{"orientation_test_6_expected_preview.jpeg"},
+			checkResponse:          CheckNoError,
+			expectImage:            true,
+			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:         "admin disabled",
-			client:        th.SystemAdminClient,
-			filenames:     []string{"test.png"},
-			checkResponse: CheckNotImplementedStatus,
+			title:                  "image thumbnail/preview 7",
+			names:                  []string{"orientation_test_7.jpeg"},
+			expectedThumbnailNames: []string{"orientation_test_7_expected_thumb.jpeg"},
+			expectedPreviewNames:   []string{"orientation_test_7_expected_preview.jpeg"},
+			checkResponse:          CheckNoError,
+			expectImage:            true,
+			expectedCreatorId:      th.BasicUser.Id,
+		},
+		{
+			title:                  "image thumbnail/preview 8",
+			names:                  []string{"orientation_test_8.jpeg"},
+			expectedThumbnailNames: []string{"orientation_test_8_expected_thumb.jpeg"},
+			expectedPreviewNames:   []string{"orientation_test_8_expected_preview.jpeg"},
+			checkResponse:          CheckNoError,
+			expectImage:            true,
+			expectedCreatorId:      th.BasicUser.Id,
+		},
+		// Error cases
+		{
+			title:                 "channelId does not exist",
+			channelId:             model.NewId(),
+			names:                 []string{"test.png"},
+			skipSuccessValidation: true,
+			checkResponse:         CheckForbiddenStatus,
+		},
+		{
+			title:                 "invalid channelId",
+			channelId:             "../../junk",
+			names:                 []string{"test.png"},
+			skipSuccessValidation: true,
+			checkResponse:         CheckBadRequestStatus,
+		},
+
+		// Admin user
+		{
+			title:             "admin",
+			client:            th.SystemAdminClient,
+			names:             []string{"test.png"},
+			checkResponse:     CheckNoError,
+			expectedCreatorId: th.SystemAdminUser.Id,
+		},
+		{
+			title:                 "admin channelId does not exist",
+			client:                th.SystemAdminClient,
+			channelId:             model.NewId(),
+			names:                 []string{"test.png"},
+			skipSuccessValidation: true,
+			checkResponse:         CheckForbiddenStatus,
+		},
+		{
+			title:                 "admin invalid channelId",
+			client:                th.SystemAdminClient,
+			channelId:             "../../junk",
+			names:                 []string{"test.png"},
+			skipSuccessValidation: true,
+			checkResponse:         CheckBadRequestStatus,
+		},
+
+		// Disabled uploads
+		{
+			title:                 "admin disabled",
+			client:                th.SystemAdminClient,
+			names:                 []string{"test.png"},
+			skipSuccessValidation: true,
+			checkResponse:         CheckNotImplementedStatus,
 			setupConfig: func(a *app.App) func(a *app.App) {
 				enableFileAttachments := *a.Config().FileSettings.EnableFileAttachments
 				a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.EnableFileAttachments = false })
@@ -277,10 +331,13 @@ func TestUploadFiles(t *testing.T) {
 				}
 			},
 		},
+
+		// File too large
 		{
-			title:         "File too large",
-			filenames:     []string{"test.png"},
-			checkResponse: CheckRequestEntityTooLargeStatus,
+			title:                 "File too large",
+			names:                 []string{"test.png"},
+			skipSuccessValidation: true,
+			checkResponse:         CheckRequestEntityTooLargeStatus,
 			setupConfig: func(a *app.App) func(a *app.App) {
 				maxFileSize := *a.Config().FileSettings.MaxFileSize
 				a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = 279590 })
@@ -289,10 +346,13 @@ func TestUploadFiles(t *testing.T) {
 				}
 			},
 		},
+		// File too large (chunked, simple POST only, multipart would've been redundant with above)
 		{
 			title:                  "File too large chunked",
 			useChunkedInSimplePost: true,
-			filenames:              []string{"test.png"},
+			skipMultipart:          true,
+			names:                  []string{"test.png"},
+			skipSuccessValidation:  true,
 			checkResponse:          CheckRequestEntityTooLargeStatus,
 			setupConfig: func(a *app.App) func(a *app.App) {
 				maxFileSize := *a.Config().FileSettings.MaxFileSize
@@ -302,10 +362,47 @@ func TestUploadFiles(t *testing.T) {
 				}
 			},
 		},
+
+		// Large streams
+		{
+			title:                  "stream happy",
+			useChunkedInSimplePost: true,
+			skipPayloadValidation:  true,
+			names:                  []string{"50Mb-stream"},
+			openers:                []model.UploadOpener{model.NewUploadOpenerReader(&zeroReader{limit: 50 * 1024 * 1024})},
+			checkResponse:          CheckNoError,
+			setupConfig: func(a *app.App) func(a *app.App) {
+				maxFileSize := *a.Config().FileSettings.MaxFileSize
+				a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = 50 * 1024 * 1024 })
+				return func(a *app.App) {
+					a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = maxFileSize })
+				}
+			},
+			expectedCreatorId: th.BasicUser.Id,
+		},
+		{
+			title:                 "stream too large",
+			skipPayloadValidation: true,
+			names:                 []string{"50Mb-stream"},
+			openers:               []model.UploadOpener{model.NewUploadOpenerReader(&zeroReader{limit: 50 * 1024 * 1024})},
+			skipSuccessValidation: true,
+			checkResponse:         CheckRequestEntityTooLargeStatus,
+			setupConfig: func(a *app.App) func(a *app.App) {
+				maxFileSize := *a.Config().FileSettings.MaxFileSize
+				a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = 100 * 1024 })
+				return func(a *app.App) {
+					a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = maxFileSize })
+				}
+			},
+		},
 	}
 
 	for _, useMultipart := range []bool{true, false} {
 		for _, tc := range tests {
+			if tc.skipMultipart && useMultipart {
+				continue
+			}
+
 			title := ""
 			if useMultipart {
 				title = "multipart "
@@ -315,7 +412,7 @@ func TestUploadFiles(t *testing.T) {
 			if tc.title != "" {
 				title += tc.title + " "
 			}
-			title += fmt.Sprintf("%v", tc.filenames)
+			title += fmt.Sprintf("%v", tc.names)
 
 			client := th.Client
 			if tc.client != nil {
@@ -332,17 +429,24 @@ func TestUploadFiles(t *testing.T) {
 			}
 
 			t.Run(title, func(t *testing.T) {
-				resp := testUploadLocalFiles(t, client, channelId, tc.filenames,
-					useMultipart, tc.useChunkedInSimplePost, tc.checkResponse,
-					true)
-				if !tc.expectSuccess {
+				if len(tc.openers) == 0 {
+					for _, name := range tc.names {
+						tc.openers = append(tc.openers, op(name))
+					}
+				}
+				fileResp, resp := client.UploadFiles(channelId, tc.names, tc.openers, nil, nil, useMultipart,
+					tc.useChunkedInSimplePost)
+				if tc.checkResponse != nil {
+					tc.checkResponse(t, resp)
+				}
+				if tc.skipSuccessValidation {
 					return
 				}
-				if resp == nil || len(resp.FileInfos) == 0 || len(resp.FileInfos) != len(tc.filenames) {
+				if fileResp == nil || len(fileResp.FileInfos) == 0 || len(fileResp.FileInfos) != len(tc.names) {
 					t.Fatal("Empty or mismatched actual or expected FileInfos")
 				}
 
-				for _, ri := range resp.FileInfos {
+				for i, ri := range fileResp.FileInfos {
 					// The returned file info from the upload call will be missing some fields that will be stored in the database
 					checkEq(t, ri.CreatorId, tc.expectedCreatorId, "File should be assigned to user")
 					checkEq(t, ri.PostId, "", "File shouldn't have a post Id")
@@ -364,7 +468,7 @@ func TestUploadFiles(t *testing.T) {
 					_, fname := filepath.Split(dbInfo.Path)
 					ext := filepath.Ext(fname)
 					name := fname[:len(fname)-len(ext)]
-					expectedDir := fmt.Sprintf(tc.expectedPathPrefix+"%s/%s", ri.CreatorId, ri.Id)
+					expectedDir := fmt.Sprintf("%v/teams/%v/channels/%v/users/%s/%s", date, FILE_TEAM_ID, channel.Id, ri.CreatorId, ri.Id)
 					expectedPath := fmt.Sprintf("%s/%s", expectedDir, fname)
 					checkEq(t, dbInfo.Path, expectedPath,
 						fmt.Sprintf("File %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.Path, expectedPath))
@@ -372,9 +476,44 @@ func TestUploadFiles(t *testing.T) {
 						expectedThumbnailPath := fmt.Sprintf("%s/%s_thumb.jpg", expectedDir, name)
 						expectedPreviewPath := fmt.Sprintf("%s/%s_preview.jpg", expectedDir, name)
 						checkEq(t, dbInfo.ThumbnailPath, expectedThumbnailPath,
-							fmt.Sprintf("File %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.ThumbnailPath, expectedThumbnailPath))
+							fmt.Sprintf("Thumbnail for %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.ThumbnailPath, expectedThumbnailPath))
 						checkEq(t, dbInfo.PreviewPath, expectedPreviewPath,
-							fmt.Sprintf("File %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.PreviewPath, expectedPreviewPath))
+							fmt.Sprintf("Preview for %v saved to:%q, expected:%q", dbInfo.Name, dbInfo.PreviewPath, expectedPreviewPath))
+					}
+
+					if !tc.skipPayloadValidation {
+						compare := func(get func(string) ([]byte, *model.Response), name string) {
+							data, resp := get(ri.Id)
+							if resp.Error != nil {
+								t.Fatal(resp.Error)
+							}
+
+							expected, err := ioutil.ReadFile(filepath.Join(testDir, name))
+							if err != nil {
+								t.Fatal(err)
+							}
+
+							if bytes.Compare(data, expected) != 0 {
+								tf, err := ioutil.TempFile("", fmt.Sprintf("test_%v_*_%s", i, name))
+								if err != nil {
+									t.Fatal(err)
+								}
+								io.Copy(tf, bytes.NewReader(data))
+								tf.Close()
+								t.Errorf("Actual data mismatched %s, written to %q", name, tf.Name())
+							}
+						}
+						if len(tc.expectedPayloadNames) == 0 {
+							tc.expectedPayloadNames = tc.names
+						}
+
+						compare(client.GetFile, tc.expectedPayloadNames[i])
+						if len(tc.expectedThumbnailNames) > i {
+							compare(client.GetFileThumbnail, tc.expectedThumbnailNames[i])
+						}
+						if len(tc.expectedThumbnailNames) > i {
+							compare(client.GetFilePreview, tc.expectedPreviewNames[i])
+						}
 					}
 
 					th.cleanupTestFile(dbInfo)
@@ -386,52 +525,6 @@ func TestUploadFiles(t *testing.T) {
 			}
 		}
 	}
-
-	testDir, _ := utils.FindDir("tests")
-	t.Run("thumb preview orientation and size", func(t *testing.T) {
-		for i := 1; i <= 8; i++ {
-			client := th.Client
-			channelId := channel.Id
-
-			fi := testUploadLocalFile(t, client, channelId,
-				fmt.Sprintf("orientation_test_%v.jpeg", i), false, false, CheckNoError, false)
-			if fi == nil {
-				t.Fatal("Expected a FileInfo, got nil")
-			}
-
-			id := fi.Id
-			compare := func(get func(string) ([]byte, *model.Response), suffix string) {
-				data, resp := get(id)
-				if resp.Error != nil {
-					t.Fatal(resp.Error)
-				}
-
-				expectedName := fmt.Sprintf("%s/orientation_test_%v_expected_%s.jpeg", testDir, i, suffix)
-				f, err := os.Open(expectedName)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer f.Close()
-				expectedData, err := ioutil.ReadAll(f)
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				if bytes.Compare(data, expectedData) != 0 {
-					tf, err := ioutil.TempFile("", fmt.Sprintf("orientation_test_%v_%s_*.jpeg", i, suffix))
-					if err != nil {
-						t.Fatal(err)
-					}
-					io.Copy(tf, bytes.NewReader(data))
-					t.Errorf("%q did not match, actual data written to %q", expectedName, tf.Name())
-					tf.Close()
-				}
-			}
-
-			compare(client.GetFileThumbnail, "thumb")
-			compare(client.GetFilePreview, "preview")
-		}
-	})
 }
 
 func TestGetFile(t *testing.T) {
