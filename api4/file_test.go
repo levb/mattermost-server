@@ -249,7 +249,7 @@ func TestUploadFiles(t *testing.T) {
 			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:                  "image thumbnail/preview 1",
+			title:                  "image thumbnail/preview 6",
 			names:                  []string{"orientation_test_6.jpeg"},
 			expectedThumbnailNames: []string{"orientation_test_6_expected_thumb.jpeg"},
 			expectedPreviewNames:   []string{"orientation_test_6_expected_preview.jpeg"},
@@ -287,6 +287,13 @@ func TestUploadFiles(t *testing.T) {
 			title:                 "invalid channelId",
 			channelId:             "../../junk",
 			names:                 []string{"test.png"},
+			skipSuccessValidation: true,
+			checkResponse:         CheckBadRequestStatus,
+		},
+		{
+			title:                 "invalid image",
+			names:                 []string{"testgif.gif"},
+			openers:               []model.UploadOpener{model.NewUploadOpenerFile(filepath.Join(testDir, "test-config.json"))},
 			skipSuccessValidation: true,
 			checkResponse:         CheckBadRequestStatus,
 		},

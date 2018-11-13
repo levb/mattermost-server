@@ -151,7 +151,6 @@ func uploadFile(c *Context, w http.ResponseWriter, r *http.Request) {
 
 func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
 	// Drain any remaining bytes in the request body, up to a limit
-	// TODO: make maxUploadDrainBytes configurable? Also, should this be the systemic behavior of all APIs with non-empty body? Otherwise dropped altogether?
 	defer io.CopyN(ioutil.Discard, r.Body, maxUploadDrainBytes)
 
 	// Write the response values to the output upon return
@@ -210,15 +209,10 @@ func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, appErr := c.App.UploadFile2(&app.UploadFileContext{
-		Timestamp:     timestamp,
-		TeamId:        FILE_TEAM_ID,
-		ChannelId:     c.Params.ChannelId,
-		UserId:        c.Session.UserId,
-		Name:          c.Params.Filename,
-		ContentLength: r.ContentLength,
-		Input:         r.Body,
-	})
+	task := c.App.NewUploadFileTask(FILE_TEAM_ID, c.Params.ChannelId, c.Session.UserId,
+		c.Params.Filename, timestamp, r.ContentLength, r.Body)
+	task.ClientId = r.Form.Get("client_id")
+	info, appErr := task.Do()
 	if appErr != nil {
 		c.Err = appErr
 		return
@@ -381,16 +375,10 @@ func uploadFileMultipart(c *Context, r *http.Request, timestamp time.Time,
 			clientId = clientIds[nFiles]
 		}
 
-		info, appErr := c.App.UploadFile2(&app.UploadFileContext{
-			Timestamp:     timestamp,
-			TeamId:        FILE_TEAM_ID,
-			ChannelId:     c.Params.ChannelId,
-			UserId:        c.Session.UserId,
-			ClientId:      clientId,
-			Name:          filename,
-			ContentLength: -1,
-			Input:         p,
-		})
+		task := c.App.NewUploadFileTask(FILE_TEAM_ID, c.Params.ChannelId,
+			c.Session.UserId, filename, timestamp, -1, p)
+		task.ClientId = clientId
+		info, appErr := task.Do()
 		if appErr != nil {
 			c.Err = appErr
 			return nil
@@ -476,16 +464,10 @@ func uploadFileMultipartBuffered(c *Context, mr *multipart.Reader,
 			clientId = clientIds[i]
 		}
 
-		info, appErr := c.App.UploadFile2(&app.UploadFileContext{
-			Timestamp:     timestamp,
-			TeamId:        FILE_TEAM_ID,
-			ChannelId:     c.Params.ChannelId,
-			UserId:        c.Session.UserId,
-			ClientId:      clientId,
-			Name:          fileHeader.Filename,
-			ContentLength: -1,
-			Input:         f,
-		})
+		task := c.App.NewUploadFileTask(FILE_TEAM_ID, c.Params.ChannelId,
+			c.Session.UserId, fileHeader.Filename, timestamp, -1, f)
+		task.ClientId = clientId
+		info, appErr := task.Do()
 		f.Close()
 		if appErr != nil {
 			c.Err = appErr

@@ -2331,7 +2331,6 @@ func (c *Client4) UploadFiles(
 	// time.
 	pipeReader, pipeWriter := io.Pipe()
 	mw := multipart.NewWriter(pipeWriter)
-	doneMultipart := false
 
 	if useMultipart {
 		fileUploadResponseChannel := make(chan *FileUploadResponse)
@@ -2361,18 +2360,6 @@ func (c *Client4) UploadFiles(
 
 				// Normal response, after the multipart was sent.
 				default:
-					if !doneMultipart {
-						// TODO: unreachable code? by this time doUploadFile will have finished, and the result uploaded to the channel
-						//response = <-responseChannel
-						//fileUploadResponse = <-fileUploadResponseChannel
-						//if !closedMultipart {
-						//	_ = mw.Close()
-						//	_ = pipeWriter.Close()
-						//	closedMultipart = true
-						//}
-						//return
-					}
-
 					if !closedMultipart {
 						err := mw.Close()
 						if err != nil {
@@ -2485,7 +2472,6 @@ func (c *Client4) UploadFiles(
 	// In case of a simple POST, the return values have been set by upload(),
 	// otherwise we finished writing the multipart, and the return values will
 	// be set in defer
-	doneMultipart = true
 	return fileUploadResponse, response
 }
 

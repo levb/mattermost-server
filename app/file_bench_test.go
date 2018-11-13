@@ -7,16 +7,53 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	"image/gif"
+	"image/jpeg"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"testing"
 	"time"
-
-	"github.com/disintegration/imaging"
 
 	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
 )
+
+var randomJPEG []byte
+var randomGIF []byte
+var zero10M = make([]byte, 10*1024*1024)
+var rgba *image.RGBA
+
+func prepareTestImages(tb testing.TB) {
+	if rgba != nil {
+		return
+	}
+
+	// Create a random image (pre-seeded for predictability)
+	rgba = image.NewRGBA(image.Rectangle{
+		image.Point{0, 0},
+		image.Point{2048, 2048},
+	})
+	_, err := rand.New(rand.NewSource(1)).Read(rgba.Pix)
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	// Encode it as JPEG and GIF
+	buf := &bytes.Buffer{}
+	err = jpeg.Encode(buf, rgba, &jpeg.Options{Quality: 50})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	randomJPEG = buf.Bytes()
+
+	buf = &bytes.Buffer{}
+	err = gif.Encode(buf, rgba, nil)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	randomGIF = buf.Bytes()
+}
 
 func BenchmarkUploadFile(b *testing.B) {
 	prepareTestImages(b)
@@ -39,6 +76,7 @@ func BenchmarkUploadFile(b *testing.B) {
 	}{
 		{fmt.Sprintf("random-%dMb-gif", mb(len(randomGIF))), ".gif", randomGIF},
 		{fmt.Sprintf("random-%dMb-jpg", mb(len(randomJPEG))), ".jpg", randomJPEG},
+		{fmt.Sprintf("zero-%dMb", mb(len(zero10M))), ".zero", zero10M},
 	}
 
 	file_benchmarks := []struct {
@@ -46,25 +84,35 @@ func BenchmarkUploadFile(b *testing.B) {
 		f     func(b *testing.B, n int, data []byte, ext string)
 	}{
 		{
-			title: "prepareImage",
+			title: "raw-ish DoUploadFile",
 			f: func(b *testing.B, n int, data []byte, ext string) {
-				_, _, _ = prepareImage(data)
-			},
-		},
-		{
-			title: "DoUploadFile",
-			f: func(b *testing.B, n int, data []byte, ext string) {
+				// re-Read the data for a more adequate comparison with
+				// "UploadFileTask raw"
+				data, _ = ioutil.ReadAll(bytes.NewReader(data))
+
 				info1, err := th.App.DoUploadFile(time.Now(), teamId, channelId,
 					userId, fmt.Sprintf("BenchmarkDoUploadFile-%d%s", n, ext), data)
 				if err != nil {
 					b.Fatal(err)
-				} else {
-					defer func() {
-						<-th.App.Srv.Store.FileInfo().PermanentDelete(info1.Id)
-						th.App.RemoveFile(info1.Path)
-					}()
 				}
+				<-th.App.Srv.Store.FileInfo().PermanentDelete(info1.Id)
+				th.App.RemoveFile(info1.Path)
 
+			},
+		},
+		{
+			title: "raw UploadFileTask",
+			f: func(b *testing.B, n int, data []byte, ext string) {
+				task := th.App.NewUploadFileTask(teamId, channelId, userId,
+					fmt.Sprintf("BenchmarkUploadFileTask-%d%s", n, ext),
+					time.Now(), int64(len(data)), bytes.NewReader(data))
+				task.Raw = true
+				info, aerr := task.Do()
+				if aerr != nil {
+					b.Fatal(aerr)
+				}
+				<-th.App.Srv.Store.FileInfo().PermanentDelete(info.Id)
+				th.App.RemoveFile(info.Path)
 			},
 		},
 		{
@@ -77,77 +125,33 @@ func BenchmarkUploadFile(b *testing.B) {
 					time.Now())
 				if err != nil {
 					b.Fatal(err)
-				} else {
-					defer func() {
-						<-th.App.Srv.Store.FileInfo().PermanentDelete(resp.FileInfos[0].Id)
-						th.App.RemoveFile(resp.FileInfos[0].Path)
-					}()
 				}
-
+				<-th.App.Srv.Store.FileInfo().PermanentDelete(resp.FileInfos[0].Id)
+				th.App.RemoveFile(resp.FileInfos[0].Path)
 			},
 		},
 		{
-			title: "UploadFile",
+			title: "UploadFileTask",
 			f: func(b *testing.B, n int, data []byte, ext string) {
-				info, err := th.App.UploadFile2(&UploadFileContext{
-					Timestamp:     time.Now(),
-					TeamId:        teamId,
-					ChannelId:     channelId,
-					UserId:        userId,
-					Name:          fmt.Sprintf("BenchmarkDoUploadFile-%d%s", n, ext),
-					ContentLength: -1,
-					Input:         bytes.NewReader(data),
-				})
-				if err != nil {
-					b.Fatal(err)
-				} else {
-					defer func() {
-						<-th.App.Srv.Store.FileInfo().PermanentDelete(info.Id)
-						th.App.RemoveFile(info.Path)
-					}()
+				info, aerr := th.App.NewUploadFileTask(teamId, channelId, userId,
+					fmt.Sprintf("BenchmarkUploadFileTask-%d%s", n, ext),
+					time.Now(), -1, bytes.NewReader(data)).Do()
+				if aerr != nil {
+					b.Fatal(aerr)
 				}
-
+				<-th.App.Srv.Store.FileInfo().PermanentDelete(info.Id)
+				th.App.RemoveFile(info.Path)
 			},
 		},
 	}
 
-	for _, fb := range file_benchmarks {
-		for _, file := range files {
-			b.Run(fb.title+"-"+file.title, func(b *testing.B) {
+	for _, file := range files {
+		for _, fb := range file_benchmarks {
+			b.Run(file.title+"-"+fb.title, func(b *testing.B) {
 				for i := 0; i < b.N; i++ {
 					fb.f(b, i, file.data, file.ext)
 				}
 			})
 		}
-	}
-}
-
-func BenchmarkUploadImageProcessing(b *testing.B) {
-	prepareTestImages(b)
-
-	image_benchmarks := []struct {
-		title string
-		f     func(b *testing.B, img image.Image)
-	}{
-		{
-			title: "(thumbnail)Resize",
-			f: func(b *testing.B, img image.Image) {
-				_ = imaging.Resize(img, 0, IMAGE_THUMBNAIL_PIXEL_HEIGHT, imaging.Lanczos)
-			},
-		},
-		{
-			title: "(preview)Resize",
-			f: func(b *testing.B, img image.Image) {
-				_ = imaging.Resize(img, IMAGE_PREVIEW_PIXEL_WIDTH, 0, imaging.Lanczos)
-			},
-		},
-	}
-
-	for _, ib := range image_benchmarks {
-		b.Run(ib.title, func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
-				ib.f(b, rgba)
-			}
-		})
 	}
 }
