@@ -218,6 +218,9 @@ func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
 	fileUploadResponse = &model.FileUploadResponse{
 		FileInfos: []*model.FileInfo{info},
 	}
+	if task.ClientId != "" {
+		fileUploadResponse.ClientIds = []string{task.ClientId}
+	}
 }
 
 type uploadFileMultipartMode bool

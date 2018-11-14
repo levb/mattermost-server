@@ -159,13 +159,15 @@ func TestUploadFiles(t *testing.T) {
 	}
 
 	tests := []struct {
-		title   string
-		client  *model.Client4
-		openers []model.UploadOpener
-		names   []string
+		title     string
+		client    *model.Client4
+		openers   []model.UploadOpener
+		names     []string
+		clientIds []string
 
 		skipSuccessValidation  bool
 		skipPayloadValidation  bool
+		skipSimplePost         bool
 		skipMultipart          bool
 		expectedPayloadNames   []string
 		expectedThumbnailNames []string
@@ -179,135 +181,153 @@ func TestUploadFiles(t *testing.T) {
 	}{
 		// Upload a bunch of files, mixed images and non-images
 		{
-			title:             "happy",
+			title:             "Happy",
 			names:             []string{"test.png", "testgif.gif", "testplugin.tar.gz", "test-config.json"},
-			checkResponse:     CheckNoError,
+			expectedCreatorId: th.BasicUser.Id,
+		},
+		// Upload a bunch of files, with clientIds
+		{
+			title:             "Happy client_ids",
+			names:             []string{"test.png", "testgif.gif", "testplugin.tar.gz", "test-config.json"},
+			clientIds:         []string{"1", "2", "3", "4"},
 			expectedCreatorId: th.BasicUser.Id,
 		},
 		// Upload a bunch of images
 		{
-			title:             "images",
+			title:             "Happy images",
 			names:             []string{"test.png", "testgif.gif"},
-			checkResponse:     CheckNoError,
 			expectImage:       true,
 			expectedCreatorId: th.BasicUser.Id,
 		},
 		// Simple POST, chunked encoding
 		{
-			title:                  "chunked simple post",
+			title:                  "Happy image chunked post",
 			skipMultipart:          true,
 			useChunkedInSimplePost: true,
 			names:                  []string{"test.png"},
-			checkResponse:          CheckNoError,
 			expectImage:            true,
 			expectedCreatorId:      th.BasicUser.Id,
 		},
 		// Image thumbnail and preview: size and orientation
 		{
-			title:                  "image thumbnail/preview 1",
+			title:                  "Happy image thumbnail/preview 1",
 			names:                  []string{"orientation_test_1.jpeg"},
 			expectedThumbnailNames: []string{"orientation_test_1_expected_thumb.jpeg"},
 			expectedPreviewNames:   []string{"orientation_test_1_expected_preview.jpeg"},
-			checkResponse:          CheckNoError,
 			expectImage:            true,
 			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:                  "image thumbnail/preview 2",
+			title:                  "Happy image thumbnail/preview 2",
 			names:                  []string{"orientation_test_2.jpeg"},
 			expectedThumbnailNames: []string{"orientation_test_2_expected_thumb.jpeg"},
 			expectedPreviewNames:   []string{"orientation_test_2_expected_preview.jpeg"},
-			checkResponse:          CheckNoError,
 			expectImage:            true,
 			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:                  "image thumbnail/preview 3",
+			title:                  "Happy image thumbnail/preview 3",
 			names:                  []string{"orientation_test_3.jpeg"},
 			expectedThumbnailNames: []string{"orientation_test_3_expected_thumb.jpeg"},
 			expectedPreviewNames:   []string{"orientation_test_3_expected_preview.jpeg"},
-			checkResponse:          CheckNoError,
 			expectImage:            true,
 			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:                  "image thumbnail/preview 4",
+			title:                  "Happy image thumbnail/preview 4",
 			names:                  []string{"orientation_test_4.jpeg"},
 			expectedThumbnailNames: []string{"orientation_test_4_expected_thumb.jpeg"},
 			expectedPreviewNames:   []string{"orientation_test_4_expected_preview.jpeg"},
-			checkResponse:          CheckNoError,
 			expectImage:            true,
 			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:                  "image thumbnail/preview 5",
+			title:                  "Happy image thumbnail/preview 5",
 			names:                  []string{"orientation_test_5.jpeg"},
 			expectedThumbnailNames: []string{"orientation_test_5_expected_thumb.jpeg"},
 			expectedPreviewNames:   []string{"orientation_test_5_expected_preview.jpeg"},
-			checkResponse:          CheckNoError,
 			expectImage:            true,
 			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:                  "image thumbnail/preview 6",
+			title:                  "Happy image thumbnail/preview 6",
 			names:                  []string{"orientation_test_6.jpeg"},
 			expectedThumbnailNames: []string{"orientation_test_6_expected_thumb.jpeg"},
 			expectedPreviewNames:   []string{"orientation_test_6_expected_preview.jpeg"},
-			checkResponse:          CheckNoError,
 			expectImage:            true,
 			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:                  "image thumbnail/preview 7",
+			title:                  "Happy image thumbnail/preview 7",
 			names:                  []string{"orientation_test_7.jpeg"},
 			expectedThumbnailNames: []string{"orientation_test_7_expected_thumb.jpeg"},
 			expectedPreviewNames:   []string{"orientation_test_7_expected_preview.jpeg"},
-			checkResponse:          CheckNoError,
 			expectImage:            true,
 			expectedCreatorId:      th.BasicUser.Id,
 		},
 		{
-			title:                  "image thumbnail/preview 8",
+			title:                  "Happy image thumbnail/preview 8",
 			names:                  []string{"orientation_test_8.jpeg"},
 			expectedThumbnailNames: []string{"orientation_test_8_expected_thumb.jpeg"},
 			expectedPreviewNames:   []string{"orientation_test_8_expected_preview.jpeg"},
-			checkResponse:          CheckNoError,
 			expectImage:            true,
 			expectedCreatorId:      th.BasicUser.Id,
 		},
+		{
+			title:             "Happy admin",
+			client:            th.SystemAdminClient,
+			names:             []string{"test.png"},
+			expectedCreatorId: th.SystemAdminUser.Id,
+		},
+		{
+			title:                  "Happy stream",
+			useChunkedInSimplePost: true,
+			skipPayloadValidation:  true,
+			names:                  []string{"50Mb-stream"},
+			openers:                []model.UploadOpener{model.NewUploadOpenerReader(&zeroReader{limit: 50 * 1024 * 1024})},
+			setupConfig: func(a *app.App) func(a *app.App) {
+				maxFileSize := *a.Config().FileSettings.MaxFileSize
+				a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = 50 * 1024 * 1024 })
+				return func(a *app.App) {
+					a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = maxFileSize })
+				}
+			},
+			expectedCreatorId: th.BasicUser.Id,
+		},
 		// Error cases
 		{
-			title:                 "channelId does not exist",
+			title:                 "Error channel_id does not exist",
 			channelId:             model.NewId(),
 			names:                 []string{"test.png"},
 			skipSuccessValidation: true,
 			checkResponse:         CheckForbiddenStatus,
 		},
 		{
-			title:                 "invalid channelId",
+			// on simple post this uploads the last file
+			// successfully, without a ClientId
+			title:                 "Error too few client_ids",
+			skipSimplePost:        true,
+			names:                 []string{"test.png", "testplugin.tar.gz", "test-config.json"},
+			clientIds:             []string{"1", "4"},
+			skipSuccessValidation: true,
+			checkResponse:         CheckBadRequestStatus,
+		},
+		{
+			title:                 "Error invalid channel_id",
 			channelId:             "../../junk",
 			names:                 []string{"test.png"},
 			skipSuccessValidation: true,
 			checkResponse:         CheckBadRequestStatus,
 		},
 		{
-			title:                 "invalid image",
+			title:                 "Error invalid image",
 			names:                 []string{"testgif.gif"},
 			openers:               []model.UploadOpener{model.NewUploadOpenerFile(filepath.Join(testDir, "test-config.json"))},
 			skipSuccessValidation: true,
 			checkResponse:         CheckBadRequestStatus,
 		},
-
-		// Admin user
 		{
-			title:             "admin",
-			client:            th.SystemAdminClient,
-			names:             []string{"test.png"},
-			checkResponse:     CheckNoError,
-			expectedCreatorId: th.SystemAdminUser.Id,
-		},
-		{
-			title:                 "admin channelId does not exist",
+			title:                 "Error admin channel_id does not exist",
 			client:                th.SystemAdminClient,
 			channelId:             model.NewId(),
 			names:                 []string{"test.png"},
@@ -315,17 +335,15 @@ func TestUploadFiles(t *testing.T) {
 			checkResponse:         CheckForbiddenStatus,
 		},
 		{
-			title:                 "admin invalid channelId",
+			title:                 "Error admin invalid channel_id",
 			client:                th.SystemAdminClient,
 			channelId:             "../../junk",
 			names:                 []string{"test.png"},
 			skipSuccessValidation: true,
 			checkResponse:         CheckBadRequestStatus,
 		},
-
-		// Disabled uploads
 		{
-			title:                 "admin disabled",
+			title:                 "Error admin disabled uploads",
 			client:                th.SystemAdminClient,
 			names:                 []string{"test.png"},
 			skipSuccessValidation: true,
@@ -338,10 +356,8 @@ func TestUploadFiles(t *testing.T) {
 				}
 			},
 		},
-
-		// File too large
 		{
-			title:                 "File too large",
+			title:                 "Error file too large",
 			names:                 []string{"test.png"},
 			skipSuccessValidation: true,
 			checkResponse:         CheckRequestEntityTooLargeStatus,
@@ -369,26 +385,8 @@ func TestUploadFiles(t *testing.T) {
 				}
 			},
 		},
-
-		// Large streams
 		{
-			title:                  "stream happy",
-			useChunkedInSimplePost: true,
-			skipPayloadValidation:  true,
-			names:                  []string{"50Mb-stream"},
-			openers:                []model.UploadOpener{model.NewUploadOpenerReader(&zeroReader{limit: 50 * 1024 * 1024})},
-			checkResponse:          CheckNoError,
-			setupConfig: func(a *app.App) func(a *app.App) {
-				maxFileSize := *a.Config().FileSettings.MaxFileSize
-				a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = 50 * 1024 * 1024 })
-				return func(a *app.App) {
-					a.UpdateConfig(func(cfg *model.Config) { *cfg.FileSettings.MaxFileSize = maxFileSize })
-				}
-			},
-			expectedCreatorId: th.BasicUser.Id,
-		},
-		{
-			title:                 "stream too large",
+			title:                 "Error stream too large",
 			skipPayloadValidation: true,
 			names:                 []string{"50Mb-stream"},
 			openers:               []model.UploadOpener{model.NewUploadOpenerReader(&zeroReader{limit: 50 * 1024 * 1024})},
@@ -406,8 +404,21 @@ func TestUploadFiles(t *testing.T) {
 
 	for _, useMultipart := range []bool{true, false} {
 		for _, tc := range tests {
-			if tc.skipMultipart && useMultipart {
+			if tc.skipMultipart && useMultipart || tc.skipSimplePost && !useMultipart {
 				continue
+			}
+
+			// Set the default values and title
+			client := th.Client
+			if tc.client != nil {
+				client = tc.client
+			}
+			channelId := channel.Id
+			if tc.channelId != "" {
+				channelId = tc.channelId
+			}
+			if tc.checkResponse == nil {
+				tc.checkResponse = CheckNoError
 			}
 
 			title := ""
@@ -421,15 +432,7 @@ func TestUploadFiles(t *testing.T) {
 			}
 			title += fmt.Sprintf("%v", tc.names)
 
-			client := th.Client
-			if tc.client != nil {
-				client = tc.client
-			}
-			channelId := channel.Id
-			if tc.channelId != "" {
-				channelId = tc.channelId
-			}
-
+			// Apply any necessary config changes
 			var restoreConfig func(a *app.App)
 			if tc.setupConfig != nil {
 				restoreConfig = tc.setupConfig(th.App)
@@ -441,14 +444,14 @@ func TestUploadFiles(t *testing.T) {
 						tc.openers = append(tc.openers, op(name))
 					}
 				}
-				fileResp, resp := client.UploadFiles(channelId, tc.names, tc.openers, nil, nil, useMultipart,
+				fileResp, resp := client.UploadFiles(channelId, tc.names,
+					tc.openers, nil, tc.clientIds, useMultipart,
 					tc.useChunkedInSimplePost)
-				if tc.checkResponse != nil {
-					tc.checkResponse(t, resp)
-				}
+				tc.checkResponse(t, resp)
 				if tc.skipSuccessValidation {
 					return
 				}
+
 				if fileResp == nil || len(fileResp.FileInfos) == 0 || len(fileResp.FileInfos) != len(tc.names) {
 					t.Fatal("Empty or mismatched actual or expected FileInfos")
 				}
@@ -460,6 +463,12 @@ func TestUploadFiles(t *testing.T) {
 					checkEq(t, ri.Path, "", "File path should not be set on returned info")
 					checkEq(t, ri.ThumbnailPath, "", "File thumbnail path should not be set on returned info")
 					checkEq(t, ri.PreviewPath, "", "File preview path should not be set on returned info")
+					if len(tc.clientIds) > i {
+						checkCond(t, len(fileResp.ClientIds) == len(tc.clientIds),
+							fmt.Sprintf("Wrong number of clientIds returned, expected %v, got %v", len(tc.clientIds), len(fileResp.ClientIds)))
+						checkEq(t, fileResp.ClientIds[i], tc.clientIds[i],
+							fmt.Sprintf("Wrong clientId returned, expected %v, got %v", tc.clientIds[i], fileResp.ClientIds[i]))
+					}
 
 					var dbInfo *model.FileInfo
 					result := <-th.App.Srv.Store.FileInfo().Get(ri.Id)

@@ -2263,12 +2263,6 @@ func escapeQuotes(s string) string {
 
 type UploadOpener func() (io.ReadCloser, int64, error)
 
-func NewUploadOpenerRequest(r *http.Request) UploadOpener {
-	return func() (io.ReadCloser, int64, error) {
-		return r.Body, r.ContentLength, nil
-	}
-}
-
 func NewUploadOpenerReader(in io.Reader) UploadOpener {
 	return func() (io.ReadCloser, int64, error) {
 		rc, ok := in.(io.ReadCloser)
@@ -2408,7 +2402,7 @@ func (c *Client4) UploadFiles(
 
 		if useMultipart {
 			if len(clientIds) > i {
-				err := mw.WriteField("client_id", clientIds[i])
+				err := mw.WriteField("client_ids", clientIds[i])
 				if err != nil {
 					return emergencyResponse(err, "upload_post_attachment.file")
 				}
