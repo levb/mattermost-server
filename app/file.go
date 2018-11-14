@@ -344,7 +344,8 @@ func (a *App) UploadMultipartFiles(teamId string, channelId string, userId strin
 	for i, fileHeader := range fileHeaders {
 		file, fileErr := fileHeader.Open()
 		if fileErr != nil {
-			return nil, model.NewAppError("UploadFiles", "api.file.upload_file.read_request.app_error", nil, fileErr.Error(), http.StatusBadRequest)
+			return nil, model.NewAppError("UploadFiles", "api.file.upload_file.read_request.app_error",
+				map[string]interface{}{"Filename": fileHeader.Filename}, fileErr.Error(), http.StatusBadRequest)
 		}
 
 		// Will be closed after UploadFiles returns
@@ -544,19 +545,18 @@ func (a *App) NewUploadFileTask(teamId, channelId, userId, name string,
 func (t *UploadFileTask) Do() (*model.FileInfo, *model.AppError) {
 	var aerr *model.AppError
 	if t.buf == nil {
-		return nil, model.NewAppError("UploadFileTask", "api.file.upload_file.read_request.app_error",
-			nil, "UploadFileTask.Do: uninitialized task, use NewUploadFileTask?",
+		return nil, t.newAppError("api.file.upload_file.read_request.app_error",
+			"UploadFileTask.Do: uninitialized task, use NewUploadFileTask?",
 			http.StatusInternalServerError)
 	}
 
 	if t.driverName == "" {
-		return nil, model.NewAppError("UploadFileTask",
-			"api.file.upload_file.storage.app_error",
-			nil, "", http.StatusNotImplemented)
+		return nil, t.newAppError("api.file.upload_file.storage.app_error", "",
+			http.StatusNotImplemented)
 	}
 	if t.ContentLength > t.maxFileSize {
-		return nil, model.NewAppError("UploadFileTask", "api.file.upload_file.too_large.app_error",
-			nil, fmt.Sprintf("Content-Length: %v, MaxFileSize:%v", t.ContentLength, t.maxFileSize),
+		return nil, t.newAppError("api.file.upload_file.too_large.app_error",
+			fmt.Sprintf("Content-Length: %v, MaxFileSize:%v", t.ContentLength, t.maxFileSize),
 			http.StatusRequestEntityTooLarge)
 	}
 
@@ -604,14 +604,11 @@ func (t *UploadFileTask) Do() (*model.FileInfo, *model.AppError) {
 func (t *UploadFileTask) readAll() *model.AppError {
 	_, err := t.buf.ReadFrom(t.limitedInput)
 	if err != nil {
-		return model.NewAppError("UploadFileTask",
-			"api.file.upload_file.read_request.app_error",
-			nil, err.Error(), http.StatusInternalServerError)
+		return t.newAppError("api.file.upload_file.read_request.app_error",
+			err.Error(), http.StatusInternalServerError)
 	}
 	if int64(t.buf.Len()) > t.limit {
-		return model.NewAppError("UploadFileTask",
-			"api.file.upload_file.too_large.app_error",
-			nil,
+		return t.newAppError("api.file.upload_file.too_large.app_error",
 			fmt.Sprintf("read: %v, limit:%v", t.buf.Len(), t.limit),
 			http.StatusRequestEntityTooLarge)
 	}
@@ -635,9 +632,8 @@ func (t *UploadFileTask) runPlugins() *model.AppError {
 		replacementInfo, rejectionReason := hooks.FileWillBeUploaded(pluginContext,
 			t.fileinfo, t.newReader(), buf)
 		if rejectionReason != "" {
-			rejectionError = model.NewAppError("UploadFileTask",
-				"api.file.upload_file.read_request.app_error",
-				nil, rejectionReason, http.StatusBadRequest)
+			rejectionError = t.newAppError("api.file.upload_file.read_request.app_error",
+				rejectionReason, http.StatusBadRequest)
 			return false
 		}
 		if replacementInfo != nil {
@@ -664,10 +660,8 @@ func (t *UploadFileTask) preprocessImage() *model.AppError {
 	// If we fail to decode, return "as is".
 	config, _, err := image.DecodeConfig(t.newReader())
 	if err != nil {
-		return model.NewAppError("UploadFileTask",
-			"api.file.upload_file.read_request.app_error",
-			nil, err.Error(), http.StatusBadRequest)
-		return nil
+		return t.newAppError("api.file.upload_file.read_request.app_error",
+			err.Error(), http.StatusBadRequest)
 	}
 
 	t.fileinfo.Width = config.Width
@@ -675,9 +669,8 @@ func (t *UploadFileTask) preprocessImage() *model.AppError {
 
 	// Check dimensions before loading the whole thing into memory later on.
 	if t.fileinfo.Width*t.fileinfo.Height > MaxImageSize {
-		return model.NewAppError("UploadFileTask",
-			"api.file.upload_file.large_image.app_error",
-			map[string]interface{}{"Filename": t.Name}, "",
+		return t.newAppError("api.file.upload_file.large_image.app_error",
+			fmt.Sprintf("width:%v, height:%v", t.fileinfo.Width, t.fileinfo.Height),
 			http.StatusBadRequest)
 	}
 	t.fileinfo.HasPreviewImage = true
@@ -813,6 +806,13 @@ func (t UploadFileTask) pathPrefix() string {
 		"/channels/" + t.ChannelId +
 		"/users/" + t.UserId +
 		"/" + t.fileinfo.Id + "/"
+}
+
+func (t UploadFileTask) newAppError(id string, details interface{}, httpStatus int) *model.AppError {
+	params := map[string]interface{}{
+		"Filename": t.Name,
+	}
+	return model.NewAppError("UploadFileTask", id, params, fmt.Sprintf("%v", details), httpStatus)
 }
 
 func (a *App) DoUploadFileExpectModification(now time.Time, rawTeamId string, rawChannelId string, rawUserId string, rawFilename string, data []byte) (*model.FileInfo, []byte, *model.AppError) {

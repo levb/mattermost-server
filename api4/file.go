@@ -165,8 +165,7 @@ func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if !*c.App.Config().FileSettings.EnableFileAttachments {
-		c.Err = model.NewAppError("uploadFileStream",
-			"api.file.attachments.disabled.app_error",
+		c.Err = model.NewAppError("uploadFileStream", "api.file.attachments.disabled.app_error",
 			nil, "", http.StatusNotImplemented)
 		return
 	}
@@ -177,8 +176,7 @@ func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
 	if r.Form == nil {
 		err := r.ParseForm()
 		if err != nil {
-			c.Err = model.NewAppError("uploadFileStream",
-				"api.file.upload_file.read_request.app_error",
+			c.Err = model.NewAppError("uploadFileStream", "api.file.upload_file.read_request.app_error",
 				nil, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -191,8 +189,7 @@ func uploadFileStream(c *Context, w http.ResponseWriter, r *http.Request) {
 		fileUploadResponse = uploadFileMultipart(c, r, timestamp, bufferedMode)
 		return
 	} else if err != http.ErrNotMultipart {
-		c.Err = model.NewAppError("uploadFileStream",
-			"api.file.upload_file.read_request.app_error",
+		c.Err = model.NewAppError("uploadFileStream", "api.file.upload_file.read_request.app_error",
 			nil, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -260,8 +257,7 @@ func uploadFileMultipart(c *Context, r *http.Request, timestamp time.Time,
 	mr, err := r.MultipartReader()
 	r.Body = prevBody
 	if err != nil {
-		c.Err = model.NewAppError("uploadFileMultipart",
-			"api.file.upload_file.read_request.app_error",
+		c.Err = model.NewAppError("uploadFileMultipart", "api.file.upload_file.read_request.app_error",
 			nil, err.Error(), http.StatusBadRequest)
 		return nil
 	}
@@ -273,8 +269,7 @@ func uploadFileMultipart(c *Context, r *http.Request, timestamp time.Time,
 			break
 		}
 		if err != nil {
-			c.Err = model.NewAppError("uploadFileMultipart",
-				"api.file.upload_file.read_request.app_error",
+			c.Err = model.NewAppError("uploadFileMultipart", "api.file.upload_file.read_request.app_error",
 				nil, err.Error(), http.StatusBadRequest)
 			return nil
 		}
@@ -289,8 +284,7 @@ func uploadFileMultipart(c *Context, r *http.Request, timestamp time.Time,
 			var b bytes.Buffer
 			_, err := io.CopyN(&b, p, maxMultipartValueBytes)
 			if err != nil && err != io.EOF {
-				c.Err = model.NewAppError("uploadFileMultipart",
-					"api.file.upload_file.read_request.app_error",
+				c.Err = model.NewAppError("uploadFileMultipart", "api.file.upload_file.read_request.app_error",
 					nil, err.Error(), http.StatusBadRequest)
 				return nil
 			}
@@ -340,8 +334,7 @@ func uploadFileMultipart(c *Context, r *http.Request, timestamp time.Time,
 			mr, err = r.MultipartReader()
 			r.Body = prevBody
 			if err != nil {
-				c.Err = model.NewAppError("uploadFileMultipart",
-					"api.file.upload_file.read_request.app_error",
+				c.Err = model.NewAppError("uploadFileMultipart", "api.file.upload_file.read_request.app_error",
 					nil, err.Error(), http.StatusBadRequest)
 				return nil
 			}
@@ -395,8 +388,7 @@ func uploadFileMultipart(c *Context, r *http.Request, timestamp time.Time,
 
 	// Verify that the number of ClientIds matched the number of files.
 	if expectClientIds && len(clientIds) != nFiles {
-		c.Err = model.NewAppError("uploadFileMultipart",
-			"api.file.upload_file.incorrect_number_of_files.app_error",
+		c.Err = model.NewAppError("uploadFileMultipart", "api.file.upload_file.incorrect_number_of_files.app_error",
 			nil, "", http.StatusBadRequest)
 		return nil
 	}
@@ -413,8 +405,7 @@ func uploadFileMultipartBuffered(c *Context, mr *multipart.Reader,
 	// Parse the entire form.
 	form, err := mr.ReadForm(*c.App.Config().FileSettings.MaxFileSize)
 	if err != nil {
-		c.Err = model.NewAppError("uploadFileMultipartiBuffered",
-			"api.file.upload_file.read_request.app_error",
+		c.Err = model.NewAppError("uploadFileMultipartiBuffered", "api.file.upload_file.read_request.app_error",
 			nil, err.Error(), http.StatusInternalServerError)
 		return nil
 	}
@@ -439,8 +430,7 @@ func uploadFileMultipartBuffered(c *Context, mr *multipart.Reader,
 	clientIds := form.Value["client_ids"]
 	fileHeaders := form.File["files"]
 	if len(clientIds) != 0 && len(clientIds) != len(fileHeaders) {
-		c.Err = model.NewAppError("uploadFilesMultipartiBuffered",
-			"api.file.upload_file.incorrect_number_of_files.app_error",
+		c.Err = model.NewAppError("uploadFilesMultipartiBuffered", "api.file.upload_file.incorrect_number_of_files.app_error",
 			nil, "", http.StatusBadRequest)
 		return nil
 	}
@@ -453,9 +443,9 @@ func uploadFileMultipartBuffered(c *Context, mr *multipart.Reader,
 	for i, fileHeader := range fileHeaders {
 		f, err := fileHeader.Open()
 		if err != nil {
-			c.Err = model.NewAppError("uploadFileMultipartiBuffered",
-				"api.file.upload_file.read_request.app_error",
-				nil, err.Error(), http.StatusInternalServerError)
+			c.Err = model.NewAppError("uploadFileMultipartiBuffered", "api.file.upload_file.read_request.app_error",
+				map[string]interface{}{"Filename": fileHeader.Filename},
+				err.Error(), http.StatusInternalServerError)
 			return nil
 		}
 
