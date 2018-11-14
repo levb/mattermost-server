@@ -743,17 +743,6 @@ func (t *UploadFileTask) postprocessImage() {
 			}
 		}()
 
-		/*
-			// this ends up notably faster, WEIRD
-			bb := &bytes.Buffer{}
-			err := jpeg.Encode(bb, img, &jpeg.Options{Quality: 90})
-			if err != nil {
-				mlog.Error(fmt.Sprintf("Unable to encode image as jpeg path=%v err=%v", path, err))
-				return
-			}
-			err := jpeg.Encode(bb, img, &jpeg.Options{Quality: 90})
-		*/
-
 		err := jpeg.Encode(w, img, &jpeg.Options{Quality: 90})
 		if err != nil {
 			mlog.Error(fmt.Sprintf("Unable to encode image as jpeg path=%v err=%v", path, err))
